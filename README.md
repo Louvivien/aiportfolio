@@ -18,7 +18,6 @@ A self-hosted portfolio tracker with:
 
 ## 🔧 Setup
 
-```bash
 git clone https://github.com/Louvivien/aiportfolio.git
 cd aiportfolio
 python3 -m venv .venv
@@ -26,7 +25,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 
-🏃‍♂️ Running
+## 🏃‍♂️ Running
 
 Backend
 
@@ -37,7 +36,7 @@ Frontend (Streamlit)
 cd frontend
 streamlit run app.py
 
-✅ Testing
+## ✅ Testing
 
 Unit & CRUD tests:
 
@@ -65,13 +64,14 @@ Run them manually:
 
 pre-commit run --all-files
 
-📚 Documentation
+
+## 📚 Documentation
 
 Automatic API docs via FastAPI at /docs and /redoc
 
 Inline docstrings in backend/app/*.py
 
-🤝 Contributing
+## 🤝 Contributing
 
 Fork & branch: git checkout -b feature/XYZ
 
@@ -86,35 +86,3 @@ Why it matters
 Screenshots (if UI)
 
 Link related Jira ticket
-
-
----
-
-## 2. Inline Documentation & API Docs
-
-- **Docstrings**: Make sure every module, function, and class in `backend/app/` has a one‐ or two‐sentence docstring.
-- **FastAPI Schema**: Your Pydantic models and route decorators automatically generate OpenAPI docs—verify them at `http://localhost:8000/docs`.
-- If you need richer docs, consider adding **mkdocs** or **Sphinx** in a `docs/` folder later.
-
----
-
-## 3. Code Review Checklist
-
-Create a simple **PULL_REQUEST_TEMPLATE.md** under `.github/`:
-
-```markdown
-## 📝 What
-
-_Short summary of changes_
-
-## 🔍 How to Test
-
-1. Steps to reproduce
-2. Expected behavior
-
-## ✅ Checklist
-
-- [ ] Code builds and tests pass
-- [ ] Linted with `pre-commit run --all-files`
-- [ ] Docstrings added/refined
-- [ ] Jira ticket referenced
