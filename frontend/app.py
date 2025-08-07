@@ -7,6 +7,47 @@ from streamlit_tags import st_tags
 API_URL = "http://127.0.0.1:8000"
 
 
+@st.dialog("Edit Position")
+def edit_dialog(pos):
+    """Show a modal dialog for editing a position."""
+    with st.form("edit_dialog_form"):
+        symbol = st.text_input("Ticker Symbol", value=pos["symbol"]).upper()
+        qty = st.number_input(
+            "Quantity", min_value=0.0, step=1.0, format="%.2f", value=pos["quantity"]
+        )
+        cost = st.number_input(
+            "Cost Price",
+            min_value=0.0,
+            step=0.01,
+            format="%.2f",
+            value=pos["cost_price"],
+        )
+        tags = st.text_input("Tags (comma-separated)", value=", ".join(pos["tags"]))
+        save_btn = st.form_submit_button("Save")
+        cancel_btn = st.form_submit_button("Cancel")
+
+    # “Save” lives here:
+    if save_btn:
+        # 1) Push to backend
+        put_position(
+            pos["_id"],
+            {
+                "symbol": symbol,
+                "quantity": qty,
+                "cost_price": cost,
+                "tags": [t.strip() for t in tags.split(",") if t.strip()],
+            },
+        )
+        st.success(f"Updated {symbol}")
+        # 2) Rerun the app; on next run you’ll see new data and dialog will be gone
+        st.rerun()
+
+    # “Cancel” also just reruns (closing the dialog with no change)
+    if cancel_btn:
+        st.info("Edit cancelled")
+        st.rerun()
+
+
 def load_tags():
     r = httpx.get(f"{API_URL}/tags")
     r.raise_for_status()
@@ -62,6 +103,10 @@ def delete_position(position_id: str):
 def main():
     st.set_page_config(page_title="Portfolio Dashboard")
     st.title("📊 P. D.")
+
+    # ─── Session state for edit modal ───────────────────────
+    if "edit_id" not in st.session_state:
+        st.session_state.edit_id = None
     # ─── Session state for tag filter ───────────────────────
     if "filter_tag" not in st.session_state:
         st.session_state.filter_tag = None
@@ -96,7 +141,6 @@ def main():
             try:
                 post_position(data)
                 st.success(f"Added {symbol}")
-                st.experimental_rerun()  # ← immediate refresh
             except Exception as e:
                 st.error(f"Error adding position: {e}")
 
@@ -163,52 +207,18 @@ def main():
         )
         c6.markdown(badges, unsafe_allow_html=True)
 
-        # Edit button opens a form in an expander
         if c7.button("✏️ Edit", key=f"edit_{pos['_id']}"):
-            with st.expander(f"Edit {pos['symbol']}", expanded=True):
-                with st.form(f"edit_form_{pos['_id']}"):
-                    new_symbol = st.text_input(
-                        "Ticker Symbol", value=pos["symbol"]
-                    ).upper()
-                    new_quantity = st.number_input(
-                        "Quantity",
-                        min_value=0.0,
-                        step=1.0,
-                        format="%.2f",
-                        value=pos["quantity"],
-                    )
-                    new_cost_price = st.number_input(
-                        "Cost Price",
-                        min_value=0.0,
-                        step=0.01,
-                        format="%.2f",
-                        value=pos["cost_price"],
-                    )
-                    new_tags = st.text_input(
-                        "Tags (comma-separated)", value=", ".join(pos["tags"])
-                    )
-                    save = st.form_submit_button("Save")
-                if save:
-                    edit_data = {
-                        "symbol": new_symbol,
-                        "quantity": new_quantity,
-                        "cost_price": new_cost_price,
-                        "tags": new_tags,
-                    }
-                    try:
-                        put_position(pos["_id"], edit_data)
-                        st.success(f"Updated {new_symbol}")
-                        st.experimental_rerun()  # ← immediate refresh
-                    except Exception as e:
-                        st.error(f"Error updating: {e}")
+            # launch the dialog (which now does its save+rerun internally)
+            edit_dialog(pos)
 
         # Delete button
         if c7.button("🗑️ Delete", key=f"del_{pos['_id']}"):
-            if st.confirm(f"Are you sure you want to delete {pos['symbol']}?"):
+            confirm_key = f"confirm_delete_{pos['_id']}"
+            confirmed = st.checkbox(f"Confirm delete {pos['symbol']}?", key=confirm_key)
+            if confirmed:
                 try:
                     delete_position(pos["_id"])
                     st.success(f"Deleted {pos['symbol']}")
-                    st.experimental_rerun()  # ← so the row actually disappears
                 except Exception as e:
                     st.error(f"Error deleting: {e}")
 
