@@ -1,10 +1,22 @@
-# backend/app/models.py
 from __future__ import annotations
 
-from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
+
+
+class TagModel(BaseModel):
+    id: str
+    name: str
+
+
+class PositionCreate(BaseModel):
+    symbol: str
+    quantity: float
+    cost_price: float
+    tags: List[str] = []
+    is_closed: bool = False
+    closing_price: Optional[float] = None
 
 
 class PositionUpdate(BaseModel):
@@ -16,31 +28,17 @@ class PositionUpdate(BaseModel):
     closing_price: Optional[float] = None
 
 
-class TagModel(BaseModel):
-    id: str = Field(alias="_id")
-    name: str
-    model_config = ConfigDict(populate_by_name=True)
-
-
-class PositionCreate(BaseModel):
+class PositionModel(BaseModel):
+    id: str = Field(alias="_id")  # ✅ use alias for Mongo _id
     symbol: str
     quantity: float
     cost_price: float
-    tags: list[str] = []
-    # closed position fields
-    is_closed: bool = False
-    closing_price: float | None = None
-
-
-class PositionModel(PositionCreate):
-    id: str = Field(alias="_id")
+    tags: List[str] = []
     current_price: float = 0.0
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-    long_name: str | None = None
-    model_config = ConfigDict(populate_by_name=True)
+    is_closed: bool = False
+    closing_price: Optional[float] = None
 
-
-class SummaryModel(BaseModel):
-    total_market_value: float
-    total_unrealized_pl: float
+    # Enrichment
+    long_name: Optional[str] = None
+    intraday_change: Optional[float] = None
+    intraday_change_pct: Optional[float] = None

@@ -1,5 +1,4 @@
 # frontend/app.py
-
 from __future__ import annotations
 
 import httpx
@@ -30,19 +29,14 @@ def parse_price(s: str | float | None) -> float | None:
         return None
 
 
-# ── Tiny helper: longer timeout + friendly messaging ───────────────────────────
 def call_api(
     method: str,
     path: str,
     *,
     json: dict | None = None,
     params: dict | None = None,
-    timeout: float = 20.0,  # bump default timeout
+    timeout: float = 20.0,
 ):
-    """
-    Make an HTTP request to the backend with a longer timeout.
-    If the backend is slow/unavailable, show a friendly message and stop the app.
-    """
     url = f"{API_URL}{path}"
     try:
         r = httpx.request(method, url, json=json, params=params, timeout=timeout)
@@ -51,31 +45,21 @@ def call_api(
         return r.json() if "application/json" in ctype else r.text
     except httpx.TimeoutException:
         st.warning("⏳ Backend is taking longer than usual. Try again in a few seconds.")
-        st.stop()  # prevent the rest of the script from erroring
+        st.stop()
     except httpx.HTTPError as e:
         st.error(f"API error while calling `{path}`: {e}")
         st.stop()
 
 
-# ── Edit dialog ────────────────────────────────────────────────────────────────
 @st.dialog("Edit Position")
 def edit_dialog(pos):
-    """Show a modal dialog for editing a position."""
     with st.form("edit_dialog_form"):
         symbol = st.text_input("Ticker Symbol", value=pos["symbol"]).upper()
         qty = st.number_input(
-            "Quantity",
-            min_value=0.0,
-            step=1.0,
-            format="%.2f",
-            value=float(pos["quantity"]),
+            "Quantity", min_value=0.0, step=1.0, format="%.2f", value=float(pos["quantity"])
         )
         cost = st.number_input(
-            "Cost Price",
-            min_value=0.0,
-            step=0.01,
-            format="%.2f",
-            value=float(pos["cost_price"]),
+            "Cost Price", min_value=0.0, step=0.01, format="%.2f", value=float(pos["cost_price"])
         )
 
         is_closed = st.checkbox("Closed", value=bool(pos.get("is_closed", False)))
@@ -85,9 +69,7 @@ def edit_dialog(pos):
             cp_default = pos.get("closing_price")
             cp_default_txt = "" if cp_default is None else fmt2(cp_default)
             closing_price_txt = st.text_input(
-                "Closing Price",
-                value=cp_default_txt,
-                help="You can type 28,09 or 28.09",
+                "Closing Price", value=cp_default_txt, help="You can type 28,09 or 28.09"
             )
             closing_price = parse_price(closing_price_txt)
 
@@ -98,7 +80,6 @@ def edit_dialog(pos):
         cancel_btn = st.form_submit_button("Cancel")
 
     if save_btn:
-        # Push to backend, then rerun to refresh table and close dialog
         call_api(
             "PUT",
             f"/positions/{pos['_id']}",
@@ -119,7 +100,6 @@ def edit_dialog(pos):
         st.rerun()
 
 
-# ── API wrappers using the helper ──────────────────────────────────────────────
 def load_tags():
     return call_api("GET", "/tags")
 
@@ -133,10 +113,6 @@ def load_summary():
 
 
 def load_tag_summary():
-    """
-    Fetch the tag roll-up summary: one row per tag with
-    total market value and total unrealized P/L.
-    """
     return call_api("GET", "/positions/tags/summary")
 
 
@@ -144,26 +120,52 @@ def post_position(data: dict):
     return call_api("POST", "/positions", json=data)
 
 
-def put_position(position_id: str, data: dict):
-    return call_api("PUT", f"/positions/{position_id}", json=data)
-
-
 def delete_position(position_id: str):
     return call_api("DELETE", f"/positions/{position_id}")
 
 
-# ── Main App ───────────────────────────────────────────────────────────────────
 def main():
-    st.set_page_config(page_title="Portfolio Dashboard")
+    st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
     st.title("📊 Portfolio Dashboard")
 
-    # session state
+    st.markdown(
+        """
+        <style>
+        .cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2rem; }
+        .cell-wrap {
+            white-space: normal; overflow: hidden;
+            display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;  /* 2 lines */
+            line-height: 1.2rem; max-height: calc(1.2rem * 2);
+        }
+        .tag-badge { background:#eee; border-radius:4px; padding:2px 6px; margin:0 2px; display:inline-block; }
+        .status-badge { font-size:0.9em; margin-left:6px; }
+        .pos-green { color: #0a0; }
+        .pos-red { color: #c00; }
+        .muted { color: #666; }
+        .actions-col div[data-testid="column"] > div { display: flex; gap: 6px; }
+
+        /* Reduce or remove Streamlit default padding and margins */
+        .block-container {
+            padding-top: 0rem !important;
+            padding-bottom: 1rem;
+            padding-left: 1rem;
+            padding-right: 1rem;
+            max-width: 100% !important;
+        }
+        .main {
+            padding-left: 0rem;
+            padding-right: 0rem;
+        }
+        header {visibility: hidden;}  /* hides Streamlit's default header space */
+    </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if "filter_tag" not in st.session_state:
         st.session_state.filter_tag = None
 
-    # 1) Add Position form
     with st.expander("➕ Add Position", expanded=True):
-        # put the toggle OUTSIDE so the UI re-runs instantly when toggled
         add_is_closed = st.checkbox("Mark as closed?", key="add_is_closed")
 
         with st.form("add_form"):
@@ -171,7 +173,6 @@ def main():
             quantity = st.number_input("Quantity", min_value=0.0, step=1.0, format="%.2f")
             cost_price = st.number_input("Cost Price", min_value=0.0, step=0.01, format="%.2f")
 
-            # show a TEXT input so we can accept "28,09" or "28.09"
             add_closing_price_txt = None
             if add_is_closed:
                 add_closing_price_txt = st.text_input(
@@ -205,23 +206,18 @@ def main():
             st.success(f"Added {symbol}")
             st.rerun()
 
-    # 2) Load data (will show friendly message if slow)
     positions = load_positions()
     summary = load_summary()
     tags_summary = load_tag_summary()
 
-    # 3) Tag roll-up summary
     st.subheader("Tag Summary (click to filter)")
-
-    # Header
-    hdr_tag, hdr_mv, hdr_pl, _ = st.columns([2, 1, 1, 0.5])
+    hdr_tag, hdr_mv, hdr_pl, _ = st.columns([2.2, 1.2, 1.2, 0.4])
     hdr_tag.markdown("**Tag**")
     hdr_mv.markdown("**Market Value**")
     hdr_pl.markdown("**Unrealized P/L**")
 
-    # Rows
     for t in tags_summary:
-        c_tag, c_mv, c_pl, c_sp = st.columns([2, 1, 1, 0.5])
+        c_tag, c_mv, c_pl, c_sp = st.columns([2.2, 1.2, 1.2, 0.4])
         if c_tag.button(t["tag"], key=f"filter_{t['tag']}"):
             st.session_state.filter_tag = t["tag"]
         c_mv.write(fmt2(t.get("total_market_value", 0.0)))
@@ -234,90 +230,118 @@ def main():
             st.session_state.filter_tag = None
             st.rerun()
 
-    # Apply filter to positions
     if st.session_state.filter_tag:
         positions = [p for p in positions if st.session_state.filter_tag in p.get("tags", [])]
 
-    # 4) Positions table
     st.subheader("Positions")
 
-    # Columns: Symbol (with link) | Name | Qty | Cost | Current | Invest | Current Value | P/L | Tags | Actions
-    cols = st.columns([1.0, 1.7, 0.8, 0.9, 1.0, 1.0, 1.2, 1.0, 1.4, 1.0])
+    # Columns: Symbol | Name | Qty | Cost | Current | Invest | Value | P/L | Intraday | % | Tags | Actions
+    col_layout = [1.1, 3.2, 0.9, 1.0, 1.1, 1.1, 1.3, 1.1, 1.0, 1.0, 1.6, 0.7]
+    cols = st.columns(col_layout)
     headers = [
         "Symbol",
         "Name",
-        "Quantity",
-        "Cost Price",
-        "Current Price",
+        "Qty",
+        "Cost",
+        "Current",
         "Invest",
-        "Current Value",
-        "+/− Value",
+        "Value",
+        "P/L",
+        "Intraday",
+        "%",
         "Tags",
-        "Actions",
+        "",
     ]
     for col, header in zip(cols, headers):
         col.markdown(f"**{header}**")
 
     for pos in positions:
-        # Effective current price: closing price if closed, else API current price
         is_closed = bool(pos.get("is_closed"))
+        # Price choice (closing if closed, else live)
         effective_price = float(
             pos.get("closing_price")
             if (is_closed and pos.get("closing_price") is not None)
             else pos.get("current_price", 0.0)
         )
-
         qty = float(pos.get("quantity", 0.0))
         cost = float(pos.get("cost_price", 0.0))
         invest = qty * cost
         current_value = qty * effective_price
         pnl_value = current_value - invest
 
-        c1, cname, cqty, ccost, ccurr, cinv, cval, cpnl, ctags, cact = st.columns(
-            [1.0, 1.7, 0.8, 0.9, 1.0, 1.0, 1.2, 1.0, 1.4, 1.0]
-        )
+        # Intraday: hide when closed or missing
+        intraday = None if is_closed else pos.get("intraday_change")
+        intraday_pct = None if is_closed else pos.get("intraday_change_pct")
 
-        # Symbol with Yahoo Finance link + closed badge
-        closed_badge = (
-            " <span style='background:#666;color:#fff;border-radius:4px;padding:2px 6px;"
-            "margin-left:4px;font-size:0.8em'>Closed</span>"
-            if is_closed
-            else ""
-        )
-        sym_link = f"[{pos['symbol']}](https://finance.yahoo.com/quote/{pos['symbol']})"
-        c1.markdown(sym_link + closed_badge, unsafe_allow_html=True)
+        (
+            c_sym,
+            c_name,
+            c_qty,
+            c_cost,
+            c_cur,
+            c_inv,
+            c_val,
+            c_pl,
+            c_iday,
+            c_idaypct,
+            c_tags,
+            c_act,
+        ) = st.columns(col_layout)
 
-        # Name (long_name from backend if available)
+        # Symbol with Yahoo link + tiny closed indicator (no extra height)
+        sym_html = f"<a href='https://finance.yahoo.com/quote/{pos['symbol']}' target='_blank'>{pos['symbol']}</a>"
+        closed_icon = " <span class='status-badge'>🔒</span>" if is_closed else ""
+        c_sym.markdown(f"<div class='cell'>{sym_html}{closed_icon}</div>", unsafe_allow_html=True)
+
+        # Long name (no wrap)
         long_name = pos.get("long_name") or ""
-        cname.write(long_name)
+        c_name.markdown(f"<div class='cell-wrap'>{long_name}</div>", unsafe_allow_html=True)
 
-        cqty.write(fmt2(qty))
-        ccost.write(fmt2(cost))
-        ccurr.write(fmt2(effective_price))
-        cinv.write(fmt2(invest))
-        cval.write(fmt2(current_value))
-        cpnl.write(fmt2(pnl_value))
+        # Numbers (fixed 2 decimals in a no-wrap cell)
+        c_qty.markdown(f"<div class='cell'>{fmt2(qty)}</div>", unsafe_allow_html=True)
+        c_cost.markdown(f"<div class='cell'>{fmt2(cost)}</div>", unsafe_allow_html=True)
+        c_cur.markdown(f"<div class='cell'>{fmt2(effective_price)}</div>", unsafe_allow_html=True)
+        c_inv.markdown(f"<div class='cell'>{fmt2(invest)}</div>", unsafe_allow_html=True)
+        c_val.markdown(f"<div class='cell'>{fmt2(current_value)}</div>", unsafe_allow_html=True)
+        c_pl.markdown(f"<div class='cell'>{fmt2(pnl_value)}</div>", unsafe_allow_html=True)
 
+        # Intraday cells (— when closed or missing). Color green/red if present.
+        intraday = None if is_closed else pos.get("intraday_change")
+        intraday_pct = None if is_closed else pos.get("intraday_change_pct")
+
+        if intraday is None:
+            c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        else:
+            intraday_class = "pos-green" if float(intraday) >= 0 else "pos-red"
+            c_iday.markdown(
+                f"<div class='cell {intraday_class}'>{fmt2(intraday)}</div>", unsafe_allow_html=True
+            )
+
+        if intraday_pct is None:
+            c_idaypct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        else:
+            intraday_pct_class = "pos-green" if float(intraday_pct) >= 0 else "pos-red"
+            c_idaypct.markdown(
+                f"<div class='cell {intraday_pct_class}'>{float(intraday_pct):.2f}%</div>",
+                unsafe_allow_html=True,
+            )
         # Tags
-        badges = " ".join(
-            f"<span style='background:#eee;border-radius:4px;padding:2px 6px;margin:2px'>{t}</span>"
-            for t in pos.get("tags", [])
-        )
-        ctags.markdown(badges, unsafe_allow_html=True)
+        badges = " ".join(f"<span class='tag-badge'>{t}</span>" for t in pos.get("tags", []))
+        c_tags.markdown(f"<div class='cell'>{badges}</div>", unsafe_allow_html=True)
 
-        # Actions
-        if cact.button("✏️ Edit", key=f"edit_{pos['_id']}"):
-            edit_dialog(pos)  # dialog handles its own save + rerun
+        # Actions: icon-only, side-by-side (no labels)
+        with c_act.container():
+            b_edit, b_del = st.columns([1, 1])
+            if b_edit.button("✏️", key=f"edit_{pos['_id']}"):
+                edit_dialog(pos)
+            if b_del.button("🗑️", key=f"del_{pos['_id']}"):
+                try:
+                    delete_position(pos["_id"])
+                    st.success(f"Deleted {pos['symbol']}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error deleting: {e}")
 
-        if cact.button("🗑️ Delete", key=f"del_{pos['_id']}"):
-            try:
-                delete_position(pos["_id"])
-                st.success(f"Deleted {pos['symbol']}")
-                st.rerun()  # refresh table right away
-            except Exception as e:
-                st.error(f"Error deleting: {e}")
-
-    # 5) Totals
     st.subheader("Totals")
     col_mv, col_pl = st.columns(2)
     col_mv.metric("Total Market Value", fmt2(summary.get("total_market_value", 0.0)))
