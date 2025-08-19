@@ -5,6 +5,23 @@ from typing import Dict, List
 import yfinance as yf
 
 
+async def get_long_names(symbols: list[str]) -> dict[str, str | None]:
+    """
+    Return a map SYMBOL -> long_name (or None if unknown).
+    We keep it resilient and tolerate failures per symbol.
+    """
+    out: dict[str, str | None] = {}
+    for s in symbols:
+        sym = s.upper()
+        try:
+            t = yf.Ticker(sym)
+            info = t.info  # yfinance may hit network here
+            out[sym] = info.get("longName") or info.get("shortName")
+        except Exception:
+            out[sym] = None
+    return out
+
+
 async def get_prices(symbols: List[str]) -> Dict[str, float]:
     """
     Fetch current prices for a list of ticker symbols using yfinance.

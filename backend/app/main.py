@@ -1,6 +1,16 @@
-# backend/app/main.py
-
 from __future__ import annotations
+
+"""
+FastAPI app for the portfolio backend.
+
+Endpoints:
+- GET  /tags
+- GET  /positions
+- POST /positions
+- PUT  /positions/{position_id}
+- GET  /positions/summary
+- GET  /positions/tags/summary
+"""
 
 from datetime import datetime
 from typing import Any, Dict, List, Union
@@ -11,13 +21,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import db
 from .models import PositionCreate, PositionModel, PositionUpdate, TagModel
-from .price_service import get_prices  # backed by yfinance
+from .price_service import get_long_names, get_prices  # yfinance-backed
 
 app = FastAPI(title="Portfolio Backend")
 
-# ──────────────────────────────────────────────
-# CORS: allow local Streamlit (adjust for prod)
-# ──────────────────────────────────────────────
+# CORS: allow local Streamlit (adjust for prod as needed)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,9 +35,9 @@ app.add_middleware(
 )
 
 
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # Helpers
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 def _oid(s: Union[str, ObjectId]) -> Union[ObjectId, str]:
     """Coerce a string to ObjectId if valid; otherwise return as-is."""
     if isinstance(s, ObjectId):
@@ -70,48 +78,71 @@ async def _upsert_tags_return_ids(names: List[str]) -> List[ObjectId]:
     return out
 
 
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # Tags
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 @app.get("/tags", response_model=List[TagModel])
-async def read_tags():
+async def read_tags() -> List[TagModel]:
+    """Return all tags (id + name)."""
     docs = await db.tags.find().to_list(None)
     return [TagModel(id=str(d["_id"]), name=d["name"]) for d in docs]
 
 
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 # Positions
-# ──────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
 @app.get("/positions", response_model=List[PositionModel])
-async def read_positions():
+async def read_positions() -> List[PositionModel]:
+    """
+    Return all positions enriched with:
+      - current_price (closing price if closed, else live)
+      - long_name (yfinance long/short name)
+      - tag names (not IDs)
+    """
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
 
+    # Fetch live prices
     try:
         price_map = await get_prices(symbols)
     except Exception:
         price_map = {s: None for s in symbols}
 
-    out = []
+    # Fetch long names
+    try:
+        names_map = await get_long_names(symbols)
+    except Exception:
+        names_map = {s: None for s in symbols}
+
+    out: List[PositionModel] = []
     for d in docs:
         sym = d["symbol"].upper()
         live = price_map.get(sym)
         is_closed = bool(d.get("is_closed", False))
         closing_price = d.get("closing_price")
+        # Prefer closing price when closed
         effective = closing_price if (is_closed and closing_price is not None) else live
         d["current_price"] = float(effective or 0.0)
 
+        # Tags → names
         d["tags"] = await _get_tag_names(d.get("tags", []))
-        d = _stringify_id(d)  # fix: convert ObjectId -> str
+
+        # Attach long_name
+        d["long_name"] = names_map.get(sym)
+
+        # Convert _id to string for Pydantic model
+        d = _stringify_id(d) or {}
         out.append(PositionModel(**d))
+
     return out
 
 
 @app.post("/positions", response_model=PositionModel)
-async def create_position(position: PositionCreate):
+async def create_position(position: PositionCreate) -> PositionModel:
+    """Create a position and return it enriched (same as GET /positions)."""
     now = datetime.utcnow()
     tag_ids = await _upsert_tags_return_ids(position.tags or [])
-    doc = {
+    doc: Dict[str, Any] = {
         "symbol": position.symbol.upper(),
         "quantity": position.quantity,
         "cost_price": position.cost_price,
@@ -123,29 +154,41 @@ async def create_position(position: PositionCreate):
     }
     res = await db.positions.insert_one(doc)
     new = await db.positions.find_one({"_id": res.inserted_id})
+    assert new is not None
 
+    # Enrich price with the same rule as GET:
     try:
-        price_map = await get_prices([new["symbol"]])
+        price_map = await get_prices([new["symbol"].upper()])
     except Exception:
-        price_map = {new["symbol"]: 0.0}
-    live = price_map.get(new["symbol"])
+        price_map = {new["symbol"].upper(): 0.0}
+    live = price_map.get(new["symbol"].upper())
     is_closed = bool(new.get("is_closed", False))
     closing_price = new.get("closing_price")
     effective = closing_price if (is_closed and closing_price is not None) else live
     new["current_price"] = float(effective or 0.0)
 
+    # Long name
+    try:
+        names_map = await get_long_names([new["symbol"].upper()])
+    except Exception:
+        names_map = {new["symbol"].upper(): None}
+    new["long_name"] = names_map.get(new["symbol"].upper())
+
+    # Tags → names
     new["tags"] = await _get_tag_names(new.get("tags", []))
-    new = _stringify_id(new)
+
+    new = _stringify_id(new) or {}
     return PositionModel(**new)
 
 
 @app.put("/positions/{position_id}", response_model=PositionModel)
-async def update_position(position_id: str, patch: PositionUpdate):
+async def update_position(position_id: str, patch: PositionUpdate) -> PositionModel:
+    """Patch a position; return the refreshed/enriched document."""
     existing = await db.positions.find_one({"_id": _oid(position_id)})
     if not existing:
         raise HTTPException(status_code=404, detail="Position not found")
 
-    update_doc = {}
+    update_doc: Dict[str, Any] = {}
 
     if patch.symbol is not None:
         update_doc["symbol"] = patch.symbol.upper()
@@ -166,30 +209,37 @@ async def update_position(position_id: str, patch: PositionUpdate):
 
     # Re-fetch and enrich exactly like in GET /positions
     doc = await db.positions.find_one({"_id": _oid(position_id)})
+    assert doc is not None
 
-    # enrich current_price using closed rules + live
-    try:
-        price_map = await get_prices([doc["symbol"].upper()])
-    except Exception:
-        price_map = {doc["symbol"].upper(): None}
-
+    # Enrich price
     sym = doc["symbol"].upper()
+    try:
+        price_map = await get_prices([sym])
+    except Exception:
+        price_map = {sym: None}
     live = price_map.get(sym)
     is_closed = bool(doc.get("is_closed", False))
     closing_price = doc.get("closing_price")
     effective = closing_price if (is_closed and closing_price is not None) else live
     doc["current_price"] = float(effective or 0.0)
 
-    # tags → names
+    # Long name
+    try:
+        names_map = await get_long_names([sym])
+    except Exception:
+        names_map = {sym: None}
+    doc["long_name"] = names_map.get(sym)
+
+    # Tags → names
     doc["tags"] = await _get_tag_names(doc.get("tags", []))
 
-    # stringify id and return
-    doc = _stringify_id(doc)
+    doc = _stringify_id(doc) or {}
     return PositionModel(**doc)
 
 
 @app.get("/positions/summary")
-async def positions_summary():
+async def positions_summary() -> Dict[str, float]:
+    """Return aggregate totals for market value and unrealized P/L."""
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
 
@@ -208,8 +258,8 @@ async def positions_summary():
         price = closing_price if (is_closed and closing_price is not None) else live
         if price is None:
             continue
-        mv = price * d["quantity"]
-        pl = (price - d["cost_price"]) * d["quantity"]
+        mv = float(price) * float(d["quantity"])
+        pl = (float(price) - float(d["cost_price"])) * float(d["quantity"])
         total_mv += mv
         total_pl += pl
 
@@ -217,7 +267,8 @@ async def positions_summary():
 
 
 @app.get("/positions/tags/summary")
-async def positions_tags_summary():
+async def positions_tags_summary() -> List[Dict[str, float | str]]:
+    """Return per-tag rollups: quantity, market value, and unrealized P/L."""
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
 
@@ -226,13 +277,11 @@ async def positions_tags_summary():
     except Exception:
         price_map = {s: None for s in symbols}
 
-    all_tag_ids = {tid for d in docs for tid in d.get("tags", [])}
-    tag_map = {
-        t["_id"]: t["name"]
-        for t in await db.tags.find({"_id": {"$in": list(all_tag_ids)}}).to_list(None)
-    }
+    all_tag_ids = {tid for d in docs for tid in d.get("tags", []) if isinstance(tid, ObjectId)}
+    tag_docs = await db.tags.find({"_id": {"$in": list(all_tag_ids)}}).to_list(None)
+    tag_map = {t["_id"]: t["name"] for t in tag_docs}
 
-    tag_summary = {}
+    tag_summary: Dict[str, Dict[str, float | str]] = {}
     for d in docs:
         sym = d["symbol"].upper()
         is_closed = bool(d.get("is_closed", False))
@@ -242,8 +291,8 @@ async def positions_tags_summary():
         if price is None:
             continue
 
-        mv = price * d["quantity"]
-        pl = (price - d["cost_price"]) * d["quantity"]
+        mv = float(price) * float(d["quantity"])
+        pl = (float(price) - float(d["cost_price"])) * float(d["quantity"])
 
         for tid in d.get("tags", []):
             name = tag_map.get(tid)
@@ -258,8 +307,9 @@ async def positions_tags_summary():
                     "total_unrealized_pl": 0.0,
                 },
             )
-            bucket["total_quantity"] += d["quantity"]
-            bucket["total_market_value"] += mv
-            bucket["total_unrealized_pl"] += pl
+            bucket["total_quantity"] = float(bucket["total_quantity"]) + float(d["quantity"])
+            bucket["total_market_value"] = float(bucket["total_market_value"]) + mv
+            bucket["total_unrealized_pl"] = float(bucket["total_unrealized_pl"]) + pl
 
+    # Return as a list to keep a stable response shape
     return list(tag_summary.values())
