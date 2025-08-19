@@ -23,6 +23,4 @@ def total_unrealized_pl(positions: List[PositionModel]) -> float:
     """
     Sum of unrealized P/L across all positions.
     """
-    return sum(
-        unrealized_pl(p.quantity, p.cost_price, p.current_price) for p in positions
-    )
+    return sum(unrealized_pl(p.quantity, p.cost_price, p.current_price) for p in positions)

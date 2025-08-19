@@ -6,16 +6,19 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
 
+  # black
   - repo: https://github.com/psf/black
-    rev: 23.9.1        # or whatever your Black version is
+    rev: 24.4.2
     hooks:
       - id: black
-        language_version: python3.13
+        args: ["--line-length=100"]
 
-  - repo: https://github.com/pre-commit/mirrors-isort
-    rev: v5.10.1
+  # isort
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
     hooks:
       - id: isort
+        args: ["--profile=black", "--line-length=100"]
 
   - repo: https://github.com/pycqa/flake8
     rev: 7.0.0

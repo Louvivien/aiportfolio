@@ -1,73 +1,46 @@
 # backend/app/models.py
+from __future__ import annotations
 
 from datetime import datetime
 from typing import List, Optional
 
-from bson import ObjectId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class PyObjectId(ObjectId):
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v, info=None):
-        if isinstance(v, ObjectId):
-            return v
-        if isinstance(v, str):
-            try:
-                return ObjectId(v)
-            except Exception:
-                raise ValueError("Invalid ObjectId")
-        raise TypeError("ObjectId or valid string required")
+class PositionUpdate(BaseModel):
+    symbol: Optional[str] = None
+    quantity: Optional[float] = None
+    cost_price: Optional[float] = None
+    tags: Optional[List[str]] = None
+    is_closed: Optional[bool] = None
+    closing_price: Optional[float] = None
 
 
 class TagModel(BaseModel):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    name: str = Field(..., min_length=1)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        validate_by_name = True
-        json_encoders = {ObjectId: str}
-
-
-class PositionModel(BaseModel):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
-    symbol: str = Field(..., min_length=1)
-    quantity: float = Field(..., gt=0)
-    cost_price: float = Field(..., ge=0)
-    current_price: float = Field(..., ge=0)
-    tags: List[str] = Field(default_factory=list)  # ← return tag names, not ObjectIds
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
-
-    class Config:
-        validate_by_name = True
-        json_encoders = {ObjectId: str}
-
-
-class TagCreate(BaseModel):
-    name: str = Field(..., min_length=1)
+    id: str = Field(alias="_id")
+    name: str
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class PositionCreate(BaseModel):
-    symbol: str = Field(..., min_length=1)
-    quantity: float = Field(..., gt=0)
-    cost_price: float = Field(..., ge=0)
-    tags: Optional[List[str]] = []  # accept names here
+    symbol: str
+    quantity: float
+    cost_price: float
+    tags: list[str] = []
+    # closed position fields
+    is_closed: bool = False
+    closing_price: float | None = None
+
+
+class PositionModel(PositionCreate):
+    id: str = Field(alias="_id")
+    current_price: float = 0.0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    long_name: str | None = None
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class SummaryModel(BaseModel):
-    total_market_value: float
-    total_unrealized_pl: float
-
-
-class TagSummaryModel(BaseModel):
-    tag: str
-    total_quantity: float
     total_market_value: float
     total_unrealized_pl: float

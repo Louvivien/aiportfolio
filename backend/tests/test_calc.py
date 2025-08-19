@@ -2,8 +2,7 @@
 
 from datetime import datetime
 
-from backend.app.calc import (total_market_value, total_unrealized_pl,
-                              unrealized_pl)
+from backend.app.calc import total_market_value, total_unrealized_pl, unrealized_pl
 from backend.app.models import PositionModel
 
 

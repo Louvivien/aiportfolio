@@ -1,29 +1,35 @@
 # backend/app/price_service.py
-import httpx
-from httpx import HTTPStatusError, RequestError
-from tenacity import retry, stop_after_attempt, wait_exponential
+
+from typing import Dict, List
+
+import yfinance as yf
 
 
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=10))
-async def get_current_price(symbol: str) -> float:
+async def get_prices(symbols: List[str]) -> Dict[str, float]:
     """
-    Fetch current price for a given ticker from Yahoo Finance.
-    Returns 0.0 on any HTTP or parsing error.
+    Fetch current prices for a list of ticker symbols using yfinance.
+    Returns a dict {symbol: price or 0.0 if not found}.
     """
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
+    prices: Dict[str, float] = {}
+
+    if not symbols:
+        return prices
+
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            data = resp.json()
-            # Safely extract the price
+        tickers = yf.Tickers(" ".join(symbols))  # batch call
+        for sym in symbols:
+            info = tickers.tickers.get(sym)
+            if not info:
+                prices[sym] = 0.0
+                continue
             try:
-                return float(data["quoteResponse"]["result"][0]["regularMarketPrice"])
-            except (KeyError, IndexError, TypeError, ValueError):
-                return 0.0
-    except (HTTPStatusError, RequestError):
-        # Rate limit hit, network issue, etc.
-        return 0.0
+                price = info.history(period="1d")["Close"].iloc[-1]
+                prices[sym] = float(price)
+            except Exception:
+                prices[sym] = 0.0
+    except Exception:
+        # fail safe
+        for sym in symbols:
+            prices[sym] = 0.0
 
-
-# Line after: end of module
+    return prices

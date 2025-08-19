@@ -1,10 +1,10 @@
 [flake8]
-# ignore all missing‐docstring and nested‐class checks
-ignore =
-    D100, D101, D102, D103, D104, D105, D200, D205, D400, D106
-# ignore missing‐annotation checks
-    , ANN001, ANN102, ANN201, ANN206
-# relax line length
-max-line-length = 100
-# typical Black ignores
-extend-ignore = E203, W503
+max-line-length = 120
+extend-ignore =
+    D100, D101, D102, D103, D104, D107,
+    D200, D205, D400,
+    ANN001, ANN101, ANN201, ANN202, ANN204
+per-file-ignores =
+    backend/smoke/test_api_smoke.py: D101, D102, D103, ANN201
+    backend/tests/conftest.py: D101, D102, D103, ANN201
+    backend/app/main.py: D103, ANN201

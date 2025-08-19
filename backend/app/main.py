@@ -1,235 +1,265 @@
 # backend/app/main.py
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import Any, Dict, List, Union
 
 from bson import ObjectId
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
-from .calc import total_market_value, total_unrealized_pl
 from .database import db
-from .models import (PositionCreate, PositionModel, SummaryModel, TagCreate,
-                     TagModel, TagSummaryModel)
-from .price_service import get_current_price
+from .models import PositionCreate, PositionModel, PositionUpdate, TagModel
+from .price_service import get_prices  # backed by yfinance
 
-app = FastAPI(title="AI Portfolio")
+app = FastAPI(title="Portfolio Backend")
 
-# ── Tag CRUD ───────────────────────────────────────────────────────────────────
-
-
-@app.post("/tags", response_model=TagModel)
-async def create_tag(tag: TagCreate):
-    if await db.tags.find_one({"name": tag.name}):
-        raise HTTPException(status_code=409, detail="Tag already exists")
-    now = datetime.utcnow()
-    doc = {"name": tag.name, "created_at": now, "updated_at": now}
-    res = await db.tags.insert_one(doc)
-    new = await db.tags.find_one({"_id": res.inserted_id})
-    return TagModel(**new)
+# ──────────────────────────────────────────────
+# CORS: allow local Streamlit (adjust for prod)
+# ──────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-@app.get("/tags", response_model=list[TagModel])
-async def read_tags():
-    docs = await db.tags.find().to_list(1000)
-    return [TagModel(**d) for d in docs]
+# ──────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────
+def _oid(s: Union[str, ObjectId]) -> Union[ObjectId, str]:
+    """Coerce a string to ObjectId if valid; otherwise return as-is."""
+    if isinstance(s, ObjectId):
+        return s
+    return ObjectId(s) if ObjectId.is_valid(s) else s
 
 
-@app.put("/tags/{tag_id}", response_model=TagModel)
-async def update_tag(tag_id: str, tag: TagCreate):
-    if not ObjectId.is_valid(tag_id):
-        raise HTTPException(404, "Tag not found")
-    now = datetime.utcnow()
-    res = await db.tags.update_one(
-        {"_id": ObjectId(tag_id)}, {"$set": {"name": tag.name, "updated_at": now}}
-    )
-    if res.matched_count == 0:
-        raise HTTPException(404, "Tag not found")
-    updated = await db.tags.find_one({"_id": ObjectId(tag_id)})
-    return TagModel(**updated)
+def _stringify_id(d: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    """Return a shallow copy with _id as str (if present)."""
+    if d is None:
+        return None
+    out: Dict[str, Any] = dict(d)
+    if "_id" in out and isinstance(out["_id"], ObjectId):
+        out["_id"] = str(out["_id"])
+    return out
 
 
-@app.delete("/tags/{tag_id}")
-async def delete_tag(tag_id: str):
-    if not ObjectId.is_valid(tag_id):
-        raise HTTPException(404, "Tag not found")
-    res = await db.tags.delete_one({"_id": ObjectId(tag_id)})
-    if res.deleted_count == 0:
-        raise HTTPException(404, "Tag not found")
-    # remove the tag reference from all positions
-    await db.positions.update_many({}, {"$pull": {"tags": ObjectId(tag_id)}})
-    return {"message": "Tag deleted"}
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-
-async def _get_tag_names(tag_ids: list[ObjectId]) -> list[str]:
+async def _get_tag_names(tag_ids: List[ObjectId]) -> List[str]:
+    """Resolve a list of Tag ObjectIds to their names (missing → skip)."""
+    if not tag_ids:
+        return []
     docs = await db.tags.find({"_id": {"$in": tag_ids}}).to_list(len(tag_ids))
-    # map each ObjectId to its name
-    name_map = {d["_id"]: d["name"] for d in docs}
-    return [name_map.get(tid, "") for tid in tag_ids]
+    name_by_id = {d["_id"]: d["name"] for d in docs}
+    return [name_by_id.get(tid, "") for tid in tag_ids if tid in name_by_id]
 
 
-# ── Position CRUD with tag-name resolution ─────────────────────────────────────
+async def _upsert_tags_return_ids(names: List[str]) -> List[ObjectId]:
+    """Ensure each tag name exists; return list of tag ObjectIds (order preserved)."""
+    out: List[ObjectId] = []
+    now = datetime.utcnow()
+    for name in names or []:
+        doc = await db.tags.find_one({"name": name})
+        if doc:
+            out.append(doc["_id"])
+        else:
+            res = await db.tags.insert_one({"name": name, "created_at": now, "updated_at": now})
+            out.append(res.inserted_id)
+    return out
+
+
+# ──────────────────────────────────────────────
+# Tags
+# ──────────────────────────────────────────────
+@app.get("/tags", response_model=List[TagModel])
+async def read_tags():
+    docs = await db.tags.find().to_list(None)
+    return [TagModel(id=str(d["_id"]), name=d["name"]) for d in docs]
+
+
+# ──────────────────────────────────────────────
+# Positions
+# ──────────────────────────────────────────────
+@app.get("/positions", response_model=List[PositionModel])
+async def read_positions():
+    docs = await db.positions.find().to_list(1000)
+    symbols = sorted({d["symbol"].upper() for d in docs})
+
+    try:
+        price_map = await get_prices(symbols)
+    except Exception:
+        price_map = {s: None for s in symbols}
+
+    out = []
+    for d in docs:
+        sym = d["symbol"].upper()
+        live = price_map.get(sym)
+        is_closed = bool(d.get("is_closed", False))
+        closing_price = d.get("closing_price")
+        effective = closing_price if (is_closed and closing_price is not None) else live
+        d["current_price"] = float(effective or 0.0)
+
+        d["tags"] = await _get_tag_names(d.get("tags", []))
+        d = _stringify_id(d)  # fix: convert ObjectId -> str
+        out.append(PositionModel(**d))
+    return out
 
 
 @app.post("/positions", response_model=PositionModel)
 async def create_position(position: PositionCreate):
     now = datetime.utcnow()
-    # upsert tags and collect ObjectIds
-    tag_ids = []
-    for name in position.tags or []:
-        tag = await db.tags.find_one({"name": name})
-        if not tag:
-            res = await db.tags.insert_one(
-                {"name": name, "created_at": now, "updated_at": now}
-            )
-            tag_ids.append(res.inserted_id)
-        else:
-            tag_ids.append(tag["_id"])
-    # build and insert
+    tag_ids = await _upsert_tags_return_ids(position.tags or [])
     doc = {
-        "symbol": position.symbol,
+        "symbol": position.symbol.upper(),
         "quantity": position.quantity,
         "cost_price": position.cost_price,
         "tags": tag_ids,
+        "is_closed": position.is_closed,
+        "closing_price": position.closing_price,
         "created_at": now,
         "updated_at": now,
     }
     res = await db.positions.insert_one(doc)
     new = await db.positions.find_one({"_id": res.inserted_id})
-    # enrich for response
-    new["current_price"] = await get_current_price(new["symbol"])
-    new["tags"] = await _get_tag_names(new["tags"])
+
+    try:
+        price_map = await get_prices([new["symbol"]])
+    except Exception:
+        price_map = {new["symbol"]: 0.0}
+    live = price_map.get(new["symbol"])
+    is_closed = bool(new.get("is_closed", False))
+    closing_price = new.get("closing_price")
+    effective = closing_price if (is_closed and closing_price is not None) else live
+    new["current_price"] = float(effective or 0.0)
+
+    new["tags"] = await _get_tag_names(new.get("tags", []))
+    new = _stringify_id(new)
     return PositionModel(**new)
 
 
-@app.get("/positions", response_model=list[PositionModel])
-async def read_positions():
+@app.put("/positions/{position_id}", response_model=PositionModel)
+async def update_position(position_id: str, patch: PositionUpdate):
+    existing = await db.positions.find_one({"_id": _oid(position_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Position not found")
+
+    update_doc = {}
+
+    if patch.symbol is not None:
+        update_doc["symbol"] = patch.symbol.upper()
+    if patch.quantity is not None:
+        update_doc["quantity"] = patch.quantity
+    if patch.cost_price is not None:
+        update_doc["cost_price"] = patch.cost_price
+    if patch.is_closed is not None:
+        update_doc["is_closed"] = bool(patch.is_closed)
+    if patch.closing_price is not None:
+        update_doc["closing_price"] = patch.closing_price
+    if patch.tags is not None:
+        update_doc["tags"] = await _upsert_tags_return_ids(patch.tags)
+
+    if update_doc:
+        update_doc["updated_at"] = datetime.utcnow()
+        await db.positions.update_one({"_id": _oid(position_id)}, {"$set": update_doc})
+
+    # Re-fetch and enrich exactly like in GET /positions
+    doc = await db.positions.find_one({"_id": _oid(position_id)})
+
+    # enrich current_price using closed rules + live
+    try:
+        price_map = await get_prices([doc["symbol"].upper()])
+    except Exception:
+        price_map = {doc["symbol"].upper(): None}
+
+    sym = doc["symbol"].upper()
+    live = price_map.get(sym)
+    is_closed = bool(doc.get("is_closed", False))
+    closing_price = doc.get("closing_price")
+    effective = closing_price if (is_closed and closing_price is not None) else live
+    doc["current_price"] = float(effective or 0.0)
+
+    # tags → names
+    doc["tags"] = await _get_tag_names(doc.get("tags", []))
+
+    # stringify id and return
+    doc = _stringify_id(doc)
+    return PositionModel(**doc)
+
+
+@app.get("/positions/summary")
+async def positions_summary():
     docs = await db.positions.find().to_list(1000)
-    out = []
+    symbols = sorted({d["symbol"].upper() for d in docs})
+
+    try:
+        price_map = await get_prices(symbols)
+    except Exception:
+        price_map = {s: None for s in symbols}
+
+    total_mv = 0.0
+    total_pl = 0.0
     for d in docs:
-        d["current_price"] = await get_current_price(d["symbol"])
-        d["tags"] = await _get_tag_names(d["tags"])
-        out.append(PositionModel(**d))
-    return out
+        sym = d["symbol"].upper()
+        is_closed = bool(d.get("is_closed", False))
+        closing_price = d.get("closing_price")
+        live = price_map.get(sym)
+        price = closing_price if (is_closed and closing_price is not None) else live
+        if price is None:
+            continue
+        mv = price * d["quantity"]
+        pl = (price - d["cost_price"]) * d["quantity"]
+        total_mv += mv
+        total_pl += pl
+
+    return {"total_market_value": total_mv, "total_unrealized_pl": total_pl}
 
 
-@app.get("/positions/summary", response_model=SummaryModel)
-async def get_positions_summary():
-    """
-    Compute and return total market value and total unrealized P/L
-    across all positions.
-    """
-    # 1) Load & enrich all positions
-    raw = await db.positions.find().to_list(1000)
-    positions = []
-    for d in raw:
-        d["current_price"] = await get_current_price(d["symbol"])
-        d["tags"] = await _get_tag_names(d["tags"])
-        positions.append(PositionModel(**d))
+@app.get("/positions/tags/summary")
+async def positions_tags_summary():
+    docs = await db.positions.find().to_list(1000)
+    symbols = sorted({d["symbol"].upper() for d in docs})
 
-    # 2) Compute totals
-    total_mv = total_market_value(positions)
-    total_pl = total_unrealized_pl(positions)
+    try:
+        price_map = await get_prices(symbols)
+    except Exception:
+        price_map = {s: None for s in symbols}
 
-    return SummaryModel(total_market_value=total_mv, total_unrealized_pl=total_pl)
+    all_tag_ids = {tid for d in docs for tid in d.get("tags", [])}
+    tag_map = {
+        t["_id"]: t["name"]
+        for t in await db.tags.find({"_id": {"$in": list(all_tag_ids)}}).to_list(None)
+    }
 
+    tag_summary = {}
+    for d in docs:
+        sym = d["symbol"].upper()
+        is_closed = bool(d.get("is_closed", False))
+        closing_price = d.get("closing_price")
+        live = price_map.get(sym)
+        price = closing_price if (is_closed and closing_price is not None) else live
+        if price is None:
+            continue
 
-@app.get("/positions/tags/summary", response_model=list[TagSummaryModel])
-async def get_tags_summary():
-    """
-    Return per-tag aggregates:
-      - total_quantity
-      - total_market_value
-      - total_unrealized_pl
-    """
-    # 1) Fetch all raw positions
-    raw = await db.positions.find().to_list(1000)
+        mv = price * d["quantity"]
+        pl = (price - d["cost_price"]) * d["quantity"]
 
-    # 2) Build a running summary per tag name
-    summary: dict[str, dict] = {}
-    for d in raw:
-        # get live price (or 0.0 fallback)
-        price = await get_current_price(d["symbol"])
-        qty = d["quantity"]
-        unreal_pl = qty * (price - d["cost_price"])
-        # resolve tag ObjectIds → names
-        tag_names = await _get_tag_names(d["tags"])
-        for name in tag_names:
-            if name not in summary:
-                summary[name] = {
+        for tid in d.get("tags", []):
+            name = tag_map.get(tid)
+            if not name:
+                continue
+            bucket = tag_summary.setdefault(
+                name,
+                {
+                    "tag": name,
                     "total_quantity": 0.0,
                     "total_market_value": 0.0,
                     "total_unrealized_pl": 0.0,
-                }
-            summary[name]["total_quantity"] += qty
-            summary[name]["total_market_value"] += qty * price
-            summary[name]["total_unrealized_pl"] += unreal_pl
-
-    # 3) Serialize to list of TagSummaryModel
-    results = []
-    for name, vals in summary.items():
-        results.append(
-            TagSummaryModel(
-                tag=name,
-                total_quantity=vals["total_quantity"],
-                total_market_value=vals["total_market_value"],
-                total_unrealized_pl=vals["total_unrealized_pl"],
+                },
             )
-        )
-    return results
+            bucket["total_quantity"] += d["quantity"]
+            bucket["total_market_value"] += mv
+            bucket["total_unrealized_pl"] += pl
 
-
-@app.get("/positions/{position_id}", response_model=PositionModel)
-async def read_position(position_id: str):
-    if not ObjectId.is_valid(position_id):
-        raise HTTPException(404, "Position not found")
-    d = await db.positions.find_one({"_id": ObjectId(position_id)})
-    if not d:
-        raise HTTPException(404, "Position not found")
-    d["current_price"] = await get_current_price(d["symbol"])
-    d["tags"] = await _get_tag_names(d["tags"])
-    return PositionModel(**d)
-
-
-@app.put("/positions/{position_id}", response_model=PositionModel)
-async def update_position(position_id: str, position: PositionCreate):
-    if not ObjectId.is_valid(position_id):
-        raise HTTPException(404, "Position not found")
-    now = datetime.utcnow()
-    tag_ids = []
-    for name in position.tags or []:
-        tag = await db.tags.find_one({"name": name})
-        if not tag:
-            res = await db.tags.insert_one(
-                {"name": name, "created_at": now, "updated_at": now}
-            )
-            tag_ids.append(res.inserted_id)
-        else:
-            tag_ids.append(tag["_id"])
-    update_data = {
-        "symbol": position.symbol,
-        "quantity": position.quantity,
-        "cost_price": position.cost_price,
-        "tags": tag_ids,
-        "updated_at": now,
-    }
-    res = await db.positions.update_one(
-        {"_id": ObjectId(position_id)}, {"$set": update_data}
-    )
-    if res.matched_count == 0:
-        raise HTTPException(404, "Position not found")
-    d = await db.positions.find_one({"_id": ObjectId(position_id)})
-    d["current_price"] = await get_current_price(d["symbol"])
-    d["tags"] = await _get_tag_names(d["tags"])
-    return PositionModel(**d)
-
-
-@app.delete("/positions/{position_id}")
-async def delete_position(position_id: str):
-    if not ObjectId.is_valid(position_id):
-        raise HTTPException(404, "Position not found")
-    res = await db.positions.delete_one({"_id": ObjectId(position_id)})
-    if res.deleted_count == 0:
-        raise HTTPException(404, "Position not found")
-    return {"message": "Position deleted"}
+    return list(tag_summary.values())
