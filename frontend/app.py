@@ -73,6 +73,51 @@ def _color_from_scale(x: float, vmin: float, vmed: float, vmax: float) -> str:
     return f"background-color: hsl({hue:.0f}, 70%, 85%); border-radius: 6px; padding: 2px 6px;"
 
 
+def _color_from_scale_intraday(x: float | None, vmin: float, vmax: float) -> str:
+    """
+    Asymmetric color scale for intraday %:
+    - Negatives map red (worst) -> orange/yellow (near 0)
+    - Positives map yellow (near 0) -> strong green (best)
+    Intense colors via high saturation / moderate lightness.
+    """
+    if x is None:
+        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
+
+    try:
+        x = float(x)
+    except Exception:
+        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
+
+    neg_min = min(0.0, float(vmin))  # most negative (≤ 0)
+    pos_max = max(0.0, float(vmax))  # most positive (≥ 0)
+
+    # Fallback: all zeros
+    if neg_min == 0.0 and pos_max == 0.0:
+        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
+
+    # Stronger, more vivid palette
+    SAT = 92
+    LGT = 70
+
+    if x < 0 and neg_min < 0:
+        # Map [neg_min .. 0] -> [red(0°) .. orange/yellow(50°)]
+        t = (x - 0.0) / (neg_min - 0.0)  # in [0..1], 1=most negative, 0=near 0-
+        t = max(0.0, min(1.0, t))
+        hue = 0.0 + (50.0 * (1.0 - t))  # 0 -> 50
+    elif x > 0 and pos_max > 0:
+        # Map [0 .. pos_max] -> [yellow(60°) .. strong green(140°)]
+        t = x / pos_max  # in [0..1]
+        t = max(0.0, min(1.0, t))
+        hue = 60.0 + (80.0 * t)  # 60 -> 140
+    else:
+        # Exactly zero (or no span on that side) -> yellow
+        hue = 58.0
+
+    return (
+        f"background-color: hsl({hue:.0f}, {SAT}%, {LGT}%); border-radius: 6px; padding: 2px 6px;"
+    )
+
+
 @st.dialog("Edit Position")
 def edit_dialog(pos):
     """Modal dialog for editing a position."""
@@ -233,21 +278,62 @@ def main():
     positions = load_positions()
     tags_summary = load_tag_summary()
 
-    # ── Tag Summary (filter) ────────────────────────────────────
+    # ── Tag Summary (click to filter) ────────────────────────────────────
     st.subheader("Tag Summary (click to filter)")
-    hdr_tag, hdr_mv, hdr_pl, _ = st.columns([2.2, 1.2, 1.2, 0.4])
+
+    # Collect intraday % values to set the color scale range
+    iday_values = []
+    for t in tags_summary:
+        v = t.get("intraday_change_pct")
+        try:
+            if v is not None:
+                iday_values.append(float(v))
+        except Exception:
+            pass
+
+    if iday_values:
+        vmin_tag = min(iday_values)
+        vmax_tag = max(iday_values)
+    else:
+        vmin_tag = vmax_tag = 0.0  # fallback when no data
+
+    # Header row (add Intraday % as a narrow column)
+    hdr_tag, hdr_mv, hdr_pl, hdr_iday, _ = st.columns([2.2, 1.2, 1.2, 0.9, 0.4])
     hdr_tag.markdown("**Tag**")
     hdr_mv.markdown("**Market Value**")
     hdr_pl.markdown("**Unrealized P/L**")
+    hdr_iday.markdown("**Intraday %**")
 
+    # Data rows
     for t in tags_summary:
-        c_tag, c_mv, c_pl, c_sp = st.columns([2.2, 1.2, 1.2, 0.4])
+        c_tag, c_mv, c_pl, c_iday, c_sp = st.columns([2.2, 1.2, 1.2, 0.9, 0.4])
+
+        # Tag as a filter button
         if c_tag.button(t["tag"], key=f"filter_{t['tag']}"):
             st.session_state.filter_tag = t["tag"]
+
+        # Market Value & Unrealized P/L
         c_mv.write(fmt2(t.get("total_market_value", 0.0)))
         c_pl.write(fmt2(t.get("total_unrealized_pl", 0.0)))
+
+        # Intraday % with asymmetric color scale (red→orange/yellow for negatives, yellow→green for positives)
+        pct = t.get("intraday_change_pct")
+        if pct is None:
+            c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        else:
+            try:
+                pctf = float(pct)
+                style = _color_from_scale_intraday(pctf, vmin_tag, vmax_tag)
+                c_iday.markdown(
+                    f"<div class='cell' style='{style}'>{pctf:.2f}%</div>",
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+
         c_sp.write("")
 
+    # Show/clear active filter
     if st.session_state.filter_tag:
         st.markdown(f"**Filtering by tag:** `{st.session_state.filter_tag}`")
         if st.button("Clear filter"):
@@ -317,9 +403,8 @@ def main():
     if intraday_pcts:
         vmin_idp = min(intraday_pcts)
         vmax_idp = max(intraday_pcts)
-        vmed_idp = statistics.median(intraday_pcts)
     else:
-        vmin_idp = vmax_idp = vmed_idp = 0.0
+        vmin_idp = vmax_idp = 0.0
 
     # ── Positions Table ─────────────────────────────────────────
     st.subheader("Positions")
@@ -429,15 +514,14 @@ def main():
                 f"<div class='cell {intraday_class}'>{fmt2(intraday_abs)}</div>",
                 unsafe_allow_html=True,
             )
-
-        # Intraday % (colored scale)
+        # Intraday % (colored scale using asymmetric intraday palette)
         if (intraday_pct is None) or is_closed:
             c_idaypct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
         else:
             intraday_pct_val = float(intraday_pct)
+            style = _color_from_scale_intraday(intraday_pct_val, vmin_idp, vmax_idp)
             c_idaypct.markdown(
-                f"<div class='cell' style='{_color_from_scale(intraday_pct_val, vmin_idp, vmed_idp, vmax_idp)}'>"
-                f"{intraday_pct_val:.2f}%</div>",
+                f"<div class='cell' style='{style}'>{intraday_pct_val:.2f}%</div>",
                 unsafe_allow_html=True,
             )
 

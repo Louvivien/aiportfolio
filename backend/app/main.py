@@ -232,92 +232,62 @@ async def positions_summary():
 # ADD THIS near the other routes in backend/app/main.py
 
 
-@app.get("/positions/summary/debug")
-async def positions_summary_debug():
-    """
-    Per-position contribution to Total Market Value for OPEN positions only.
-    """
-    docs = await db.positions.find().to_list(1000)
-    symbols = sorted({d["symbol"].upper() for d in docs})
-
-    try:
-        price_map = await get_prices(symbols)  # {SYM: {"current": ...}}
-    except Exception:
-        price_map = {s: {} for s in symbols}
-
-    rows = []
-    total = 0.0
-    for d in docs:
-        is_closed = _as_true(d.get("is_closed", False))
-        if is_closed:
-            continue
-
-        sym = d["symbol"].upper()
-        qty = float(d.get("quantity", 0.0))
-        price = price_map.get(sym, {}).get("current")
-        if price is None:
-            rows.append(
-                {
-                    "symbol": sym,
-                    "qty": qty,
-                    "used_price": None,
-                    "subtotal": 0.0,
-                    "note": "missing live price",
-                }
-            )
-            continue
-
-        price_f = float(price)
-        subtotal = price_f * qty
-        total += subtotal
-        rows.append(
-            {
-                "symbol": sym,
-                "qty": qty,
-                "used_price": price_f,
-                "subtotal": subtotal,
-                "note": "",
-            }
-        )
-
-    return {"total_market_value": total, "rows": rows}
-
-
 @app.get("/positions/tags/summary")
 async def positions_tags_summary():
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
 
     try:
-        price_map = await get_prices(symbols)  # {SYM: {"current": ..., ...}}
+        price_map = await get_prices(symbols)  # {SYM: {"current": ..., "change_pct": ...}}
     except Exception:
         price_map = {s: {} for s in symbols}
 
-    # map tag_id -> tag name
+    # tag_id -> tag name
     all_tag_ids = {tid for d in docs for tid in d.get("tags", [])}
     tag_docs = await db.tags.find({"_id": {"$in": list(all_tag_ids)}}).to_list(None)
     tag_map = {t["_id"]: t["name"] for t in tag_docs}
 
     out: dict[str, dict] = {}
+
     for d in docs:
-        if _as_true(d.get("is_closed", False)):
-            continue  # exclude closed from tag totals too
+        # only OPEN positions contribute
+        if bool(d.get("is_closed", False)):
+            continue
 
         sym = d["symbol"].upper()
         p = price_map.get(sym, {})
-        price = p.get("current")
-        if price is None:
+        current = p.get("current")
+        change_pct = p.get("change_pct")  # e.g., 1.27 means +1.27%
+
+        if current is None:
             continue
 
         qty = float(d.get("quantity", 0.0))
         cost = float(d.get("cost_price", 0.0))
-        mv = price * qty
-        pl = (price - cost) * qty
+        mv = float(current) * qty
+        pl = (float(current) - cost) * qty
+
+        # For weighted intraday %: reconstruct yesterday's close
+        # prev_close = current / (1 + change_pct/100)
+        base_prev = None
+        delta_today = None
+        if change_pct is not None:
+            try:
+                cp = float(change_pct)
+                curr_f = float(current)
+                prev_close = curr_f / (1.0 + cp / 100.0) if cp > -100.0 else None
+                if prev_close and prev_close > 0:
+                    base_prev = prev_close * qty
+                    delta_today = (curr_f - prev_close) * qty
+            except Exception:
+                base_prev = None
+                delta_today = None
 
         for tid in d.get("tags", []):
             name = tag_map.get(tid)
             if not name:
                 continue
+
             bucket = out.setdefault(
                 name,
                 {
@@ -325,10 +295,29 @@ async def positions_tags_summary():
                     "total_quantity": 0.0,
                     "total_market_value": 0.0,
                     "total_unrealized_pl": 0.0,
+                    # accumulators for weighted intraday %
+                    "_iday_base": 0.0,  # sum of previous-close market values
+                    "_iday_delta": 0.0,  # sum of (today - prev) market deltas
                 },
             )
+
             bucket["total_quantity"] += qty
             bucket["total_market_value"] += mv
             bucket["total_unrealized_pl"] += pl
 
-    return list(out.values())
+            if base_prev is not None and delta_today is not None:
+                bucket["_iday_base"] += base_prev
+                bucket["_iday_delta"] += delta_today
+
+    # finalize intraday % per tag
+    result = []
+    for name, b in out.items():
+        base = b.pop("_iday_base", 0.0)
+        delta = b.pop("_iday_delta", 0.0)
+        if base > 0:
+            b["intraday_change_pct"] = (delta / base) * 100.0
+        else:
+            b["intraday_change_pct"] = None
+        result.append(b)
+
+    return result
