@@ -56,65 +56,100 @@ def call_api(
         st.stop()
 
 
+# --- Google Sheets–style color helpers ---------------------------------------
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*rgb)
+
+
+def _blend(c1: str, c2: str, t: float) -> str:
+    """Linear blend between two hex colors (0..1)."""
+    t = max(0.0, min(1.0, float(t)))
+    r1, g1, b1 = _hex_to_rgb(c1)
+    r2, g2, b2 = _hex_to_rgb(c2)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    b = round(b1 + (b2 - b1) * t)
+    return _rgb_to_hex((r, g, b))
+
+
+# Google palette (matches your sheet screenshot)
+_GS_RED = "#d93025"
+_GS_YEL = "#fbbc04"
+_GS_GRN = "#34a853"
+_NEUTRAL = "#e9ecef"  # light gray fallback
+
+
 def _color_from_scale(x: float, vmin: float, vmed: float, vmax: float) -> str:
     """
-    Map value x onto a red(0deg)→yellow(60deg)→green(120deg) HSL hue.
-    Uses vmin, vmed, vmax (min/median/max of the column).
-    Returns an inline CSS style string for background color.
+    Return a Google Sheets–style 3-color scale:
+    min → red, mid → yellow, max → green.
+    Used for P/L (value) cells.
     """
+    try:
+        x = float(x)
+    except Exception:
+        return f"background-color:{_NEUTRAL}; color:black; " "border-radius:6px; padding:2px 6px;"
+
     if vmin == vmax:
-        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
+        return f"background-color:{_NEUTRAL}; color:black; " "border-radius:6px; padding:2px 6px;"
+
     if x <= vmed:
+        # min..mid → red..yellow
         t = 0.0 if vmed == vmin else (x - vmin) / (vmed - vmin)
-        hue = 0 + (60 * max(0.0, min(1.0, t)))
+        color = _blend(_GS_RED, _GS_YEL, t)
     else:
+        # mid..max → yellow..green
         t = 1.0 if vmax == vmed else (x - vmed) / (vmax - vmed)
-        hue = 60 + (60 * max(0.0, min(1.0, t)))
-    return f"background-color: hsl({hue:.0f}, 70%, 85%); border-radius: 6px; padding: 2px 6px;"
+        color = _blend(_GS_YEL, _GS_GRN, t)
+
+    # always white text
+    return f"background-color:{color}; color:white; border-radius:6px; padding:2px 6px;"
 
 
 def _color_from_scale_intraday(x: float | None, vmin: float, vmax: float) -> str:
     """
-    Asymmetric color scale for intraday %:
-    - Negatives map red (worst) -> orange/yellow (near 0)
-    - Positives map yellow (near 0) -> strong green (best)
-    Intense colors via high saturation / moderate lightness.
+    Google Sheets–style scale for INTRADAY % with hard 0 pivot:
+      negatives  -> red .. yellow  (NEVER green)
+      positives  -> yellow .. green
     """
     if x is None:
-        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
-
+        return (
+            f"background-color:{_NEUTRAL}; color:black; "
+            "border-radius:6px; padding:2px 6px; display:inline-block; "
+            "min-width:64px; text-align:right;"
+        )
     try:
         x = float(x)
     except Exception:
-        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
+        return (
+            f"background-color:{_NEUTRAL}; color:black; "
+            "border-radius:6px; padding:2px 6px; display:inline-block; "
+            "min-width:64px; text-align:right;"
+        )
 
-    neg_min = min(0.0, float(vmin))  # most negative (≤ 0)
-    pos_max = max(0.0, float(vmax))  # most positive (≥ 0)
-
-    # Fallback: all zeros
-    if neg_min == 0.0 and pos_max == 0.0:
-        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
-
-    # Stronger, more vivid palette
-    SAT = 92
-    LGT = 70
+    neg_min = min(0.0, float(vmin))
+    pos_max = max(0.0, float(vmax))
 
     if x < 0 and neg_min < 0:
-        # Map [neg_min .. 0] -> [red(0°) .. orange/yellow(50°)]
-        t = (x - 0.0) / (neg_min - 0.0)  # in [0..1], 1=most negative, 0=near 0-
-        t = max(0.0, min(1.0, t))
-        hue = 0.0 + (50.0 * (1.0 - t))  # 0 -> 50
+        # [neg_min .. 0] → red .. yellow
+        t = (x - neg_min) / (0.0 - neg_min)
+        color = _blend(_GS_RED, _GS_YEL, t)
     elif x > 0 and pos_max > 0:
-        # Map [0 .. pos_max] -> [yellow(60°) .. strong green(140°)]
-        t = x / pos_max  # in [0..1]
-        t = max(0.0, min(1.0, t))
-        hue = 60.0 + (80.0 * t)  # 60 -> 140
+        # [0 .. pos_max] → yellow .. green
+        t = x / pos_max
+        color = _blend(_GS_YEL, _GS_GRN, t)
     else:
-        # Exactly zero (or no span on that side) -> yellow
-        hue = 58.0
+        color = _GS_YEL  # exactly 0
 
+    # white text for readability
     return (
-        f"background-color: hsl({hue:.0f}, {SAT}%, {LGT}%); border-radius: 6px; padding: 2px 6px;"
+        f"background-color:{color}; color:white; border-radius:6px; padding:2px 6px; "
+        "display:inline-block; min-width:64px; text-align:right;"
     )
 
 
@@ -504,12 +539,13 @@ def main():
         # P/L % (plain text)
         c_plpct.markdown(f"<div class='cell'>{pnl_pct:.2f}%</div>", unsafe_allow_html=True)
 
-        # Intraday absolute (red/green text or em dash if closed/missing)
-        intraday_abs = None if is_closed else pos.get("intraday_change")
+        # Intraday absolute (position value change = per-share change × quantity)
+        raw_change = None if is_closed else pos.get("intraday_change")
+        intraday_abs = None if (raw_change is None) else float(raw_change) * qty
         if intraday_abs is None:
             c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
         else:
-            intraday_class = "pos-green" if float(intraday_abs) >= 0 else "pos-red"
+            intraday_class = "pos-green" if intraday_abs >= 0 else "pos-red"
             c_iday.markdown(
                 f"<div class='cell {intraday_class}'>{fmt2(intraday_abs)}</div>",
                 unsafe_allow_html=True,
