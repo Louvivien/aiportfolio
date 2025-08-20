@@ -29,6 +29,16 @@ def _oid(s: Union[str, ObjectId]) -> Union[ObjectId, str]:
     return ObjectId(s) if ObjectId.is_valid(s) else s
 
 
+def _as_true(v) -> bool:
+    if v is True:
+        return True
+    if isinstance(v, str):
+        return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+    if isinstance(v, (int, float)):
+        return v == 1
+    return False
+
+
 def _stringify_id(d: Dict[str, Any] | None) -> Dict[str, Any] | None:
     if d is None:
         return None
@@ -80,7 +90,7 @@ async def read_positions():
         sym = d["symbol"].upper()
         p = price_map.get(sym, {})
 
-        is_closed = bool(d.get("is_closed", False))
+        is_closed = _as_true(d.get("is_closed", False))
         closing_price = d.get("closing_price")
         live = p.get("current")
         effective = closing_price if (is_closed and closing_price is not None) else live
@@ -122,7 +132,7 @@ async def create_position(position: PositionCreate):
 
     sym = new["symbol"].upper()
     p = price_map.get(sym, {})
-    is_closed = bool(new.get("is_closed", False))
+    is_closed = _as_true(new.get("is_closed", False))
     closing_price = new.get("closing_price")
     live = p.get("current")
     effective = closing_price if (is_closed and closing_price is not None) else live
@@ -169,7 +179,7 @@ async def update_position(position_id: str, patch: PositionUpdate):
 
     sym = doc["symbol"].upper()
     p = price_map.get(sym, {})
-    is_closed = bool(doc.get("is_closed", False))
+    is_closed = _as_true(doc.get("is_closed", False))
     closing_price = doc.get("closing_price")
     live = p.get("current")
     effective = closing_price if (is_closed and closing_price is not None) else live
@@ -188,8 +198,8 @@ async def update_position(position_id: str, patch: PositionUpdate):
 @app.get("/positions/summary")
 async def positions_summary():
     """
-    Return total market value and unrealized P/L across all positions.
-    Uses closing price for closed positions, else live price.
+    Return total market value and unrealized P/L across all *open* positions.
+    Closed positions are excluded from both totals.
     """
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
@@ -203,22 +213,74 @@ async def positions_summary():
     total_pl = 0.0
 
     for d in docs:
+        if _as_true(d.get("is_closed", False)):
+            continue  # exclude closed from totals
+
         sym = d["symbol"].upper()
         p = price_map.get(sym, {})
-        live = p.get("current")
-
-        is_closed = bool(d.get("is_closed", False))
-        closing_price = d.get("closing_price")
-        price = closing_price if (is_closed and closing_price is not None) else live
+        price = p.get("current")
         if price is None:
             continue
-
         qty = float(d.get("quantity", 0.0))
         cost = float(d.get("cost_price", 0.0))
         total_mv += price * qty
         total_pl += (price - cost) * qty
 
     return {"total_market_value": total_mv, "total_unrealized_pl": total_pl}
+
+
+# ADD THIS near the other routes in backend/app/main.py
+
+
+@app.get("/positions/summary/debug")
+async def positions_summary_debug():
+    """
+    Per-position contribution to Total Market Value for OPEN positions only.
+    """
+    docs = await db.positions.find().to_list(1000)
+    symbols = sorted({d["symbol"].upper() for d in docs})
+
+    try:
+        price_map = await get_prices(symbols)  # {SYM: {"current": ...}}
+    except Exception:
+        price_map = {s: {} for s in symbols}
+
+    rows = []
+    total = 0.0
+    for d in docs:
+        is_closed = _as_true(d.get("is_closed", False))
+        if is_closed:
+            continue
+
+        sym = d["symbol"].upper()
+        qty = float(d.get("quantity", 0.0))
+        price = price_map.get(sym, {}).get("current")
+        if price is None:
+            rows.append(
+                {
+                    "symbol": sym,
+                    "qty": qty,
+                    "used_price": None,
+                    "subtotal": 0.0,
+                    "note": "missing live price",
+                }
+            )
+            continue
+
+        price_f = float(price)
+        subtotal = price_f * qty
+        total += subtotal
+        rows.append(
+            {
+                "symbol": sym,
+                "qty": qty,
+                "used_price": price_f,
+                "subtotal": subtotal,
+                "note": "",
+            }
+        )
+
+    return {"total_market_value": total, "rows": rows}
 
 
 @app.get("/positions/tags/summary")
@@ -238,13 +300,12 @@ async def positions_tags_summary():
 
     out: dict[str, dict] = {}
     for d in docs:
+        if _as_true(d.get("is_closed", False)):
+            continue  # exclude closed from tag totals too
+
         sym = d["symbol"].upper()
         p = price_map.get(sym, {})
-        live = p.get("current")
-
-        is_closed = bool(d.get("is_closed", False))
-        closing_price = d.get("closing_price")
-        price = closing_price if (is_closed and closing_price is not None) else live
+        price = p.get("current")
         if price is None:
             continue
 

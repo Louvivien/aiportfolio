@@ -22,89 +22,55 @@ async def get_long_names(symbols: list[str]) -> dict[str, str | None]:
     return out
 
 
-async def get_prices(symbols: List[str]) -> Dict[str, dict]:
-    """
-    Return a dict per symbol with:
-      - current: float | None
-      - prev_close: float | None
-      - change: float | None     (current - prev_close)
-      - change_pct: float | None (change / prev_close)
-      - long_name: str | None
-    """
-    out: Dict[str, dict] = {}
-    if not symbols:
-        return out
+def _to_float(x) -> Optional[float]:
+    try:
+        return float(x)
+    except Exception:
+        return None
 
-    # yfinance batch wrapper
-    tickers = yf.Tickers(" ".join(symbols))
+
+async def get_prices(symbols: List[str]) -> Dict[str, Dict]:
+    """
+    Return a dict keyed by uppercased symbol with:
+      - current: last traded price
+      - change:  absolute intraday change (current - previous_close)
+      - change_pct: intraday percent change **in percent units** (e.g. 1.27 for +1.27%)
+      - long_name: security long name (best-effort)
+    """
+    out: Dict[str, Dict] = {}
+
     for raw in symbols:
-        sym = raw.upper()
+        s = raw.upper()
         try:
-            t = tickers.tickers.get(sym) or yf.Ticker(sym)
+            t = yf.Ticker(raw)
 
-            # Try fast_info first
-            current: Optional[float] = None
-            prev_close: Optional[float] = None
-            long_name: Optional[str] = None
+            # Prefer fast_info when available (fewer API calls)
+            fast = getattr(t, "fast_info", None) or {}
+            current = _to_float(fast.get("last_price") or fast.get("lastPrice") or fast.get("last"))
+            prev = _to_float(fast.get("previous_close") or fast.get("previousClose"))
 
-            try:
-                fi = getattr(t, "fast_info", None) or {}
-                current = float(fi.get("last_price")) if fi.get("last_price") is not None else None
-                prev_close = (
-                    float(fi.get("previous_close"))
-                    if fi.get("previous_close") is not None
-                    else None
-                )
-            except Exception:
-                pass
+            # Fallback to .info if fast_info is missing anything
+            if current is None or prev is None:
+                info = t.info or {}
+                current = current or _to_float(info.get("regularMarketPrice"))
+                prev = prev or _to_float(info.get("regularMarketPreviousClose"))
 
-            # Fallback via history if needed
-            if prev_close is None:
-                try:
-                    hist = t.history(period="2d")["Close"]
-                    if len(hist) >= 2:
-                        prev_close = float(hist.iloc[-2])
-                    elif len(hist) == 1:
-                        prev_close = float(hist.iloc[-1])
-                except Exception:
-                    pass
+            change = (current - prev) if (current is not None and prev is not None) else None
+            change_pct = (
+                (change / prev * 100.0) if (change is not None and prev not in (None, 0)) else None
+            )
 
-            # Long name
-            try:
-                info = t.get_info()
-                long_name = info.get("longName") or info.get("shortName")
-            except Exception:
-                long_name = None
+            # Long name best-effort
+            info = getattr(t, "info", {}) or {}
+            long_name = info.get("longName") or info.get("shortName")
 
-            # If current still None, try last close
-            if current is None:
-                try:
-                    hist = t.history(period="1d")["Close"]
-                    if len(hist):
-                        current = float(hist.iloc[-1])
-                except Exception:
-                    pass
-
-            change = None
-            change_pct = None
-            if current is not None and prev_close not in (None, 0):
-                change = current - prev_close
-                change_pct = change / prev_close
-
-            out[sym] = {
+            out[s] = {
                 "current": current,
-                "prev_close": prev_close,
                 "change": change,
-                "change_pct": change_pct,
+                "change_pct": change_pct,  # <- now a real percent (1.27, not 0.0127)
                 "long_name": long_name,
             }
         except Exception:
-            out[sym] = {
-                "current": None,
-                "prev_close": None,
-                "change": None,
-                "change_pct": None,
-                "long_name": None,
-            }
+            out[s] = {"current": None, "change": None, "change_pct": None, "long_name": None}
 
     return out

@@ -1,6 +1,8 @@
 # frontend/app.py
 from __future__ import annotations
 
+import statistics
+
 import httpx
 import streamlit as st
 from streamlit_tags import st_tags
@@ -9,6 +11,7 @@ API_URL = "http://127.0.0.1:8000"
 
 
 def fmt2(x) -> str:
+    """Format any number to 2 decimals; otherwise '0.00'."""
     try:
         return f"{float(x):.2f}"
     except (TypeError, ValueError):
@@ -16,6 +19,7 @@ def fmt2(x) -> str:
 
 
 def parse_price(s: str | float | None) -> float | None:
+    """Accept '28,09' or '28.09' or a float; return float or None."""
     if s is None:
         return None
     if isinstance(s, (int, float)):
@@ -37,6 +41,7 @@ def call_api(
     params: dict | None = None,
     timeout: float = 20.0,
 ):
+    """Small HTTP helper with nicer Streamlit errors."""
     url = f"{API_URL}{path}"
     try:
         r = httpx.request(method, url, json=json, params=params, timeout=timeout)
@@ -51,8 +56,26 @@ def call_api(
         st.stop()
 
 
+def _color_from_scale(x: float, vmin: float, vmed: float, vmax: float) -> str:
+    """
+    Map value x onto a red(0deg)→yellow(60deg)→green(120deg) HSL hue.
+    Uses vmin, vmed, vmax (min/median/max of the column).
+    Returns an inline CSS style string for background color.
+    """
+    if vmin == vmax:
+        return "background-color: hsl(0, 0%, 90%); border-radius: 6px; padding: 2px 6px;"
+    if x <= vmed:
+        t = 0.0 if vmed == vmin else (x - vmin) / (vmed - vmin)
+        hue = 0 + (60 * max(0.0, min(1.0, t)))
+    else:
+        t = 1.0 if vmax == vmed else (x - vmed) / (vmax - vmed)
+        hue = 60 + (60 * max(0.0, min(1.0, t)))
+    return f"background-color: hsl({hue:.0f}, 70%, 85%); border-radius: 6px; padding: 2px 6px;"
+
+
 @st.dialog("Edit Position")
 def edit_dialog(pos):
+    """Modal dialog for editing a position."""
     with st.form("edit_dialog_form"):
         symbol = st.text_input("Ticker Symbol", value=pos["symbol"]).upper()
         qty = st.number_input(
@@ -125,46 +148,46 @@ def delete_position(position_id: str):
 
 
 def main():
-    st.set_page_config(page_title="Portfolio Dashboard", layout="wide")
+    st.set_page_config(page_title="Portfolio Dashboard")
     st.title("📊 Portfolio Dashboard")
 
+    # Global style tweaks
     st.markdown(
         """
         <style>
+        /* Cells */
         .cell { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2rem; }
         .cell-wrap {
             white-space: normal; overflow: hidden;
-            display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;  /* 2 lines */
+            display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
             line-height: 1.2rem; max-height: calc(1.2rem * 2);
         }
         .tag-badge { background:#eee; border-radius:4px; padding:2px 6px; margin:0 2px; display:inline-block; }
-        .status-badge { font-size:0.9em; margin-left:6px; }
+        .status-badge { font-size:0.9em; margin-left: 6px; }
         .pos-green { color: #0a0; }
         .pos-red { color: #c00; }
         .muted { color: #666; }
-        .actions-col div[data-testid="column"] > div { display: flex; gap: 6px; }
 
-        /* Reduce or remove Streamlit default padding and margins */
+        /* Tight layout */
         .block-container {
-            padding-top: 0rem !important;
-            padding-bottom: 1rem;
-            padding-left: 1rem;
-            padding-right: 1rem;
+            padding-top: 0.5rem !important;
+            padding-bottom: 0.5rem !important;
+            padding-left: 0.75rem !important;
+            padding-right: 0.75rem !important;
             max-width: 100% !important;
         }
-        .main {
-            padding-left: 0rem;
-            padding-right: 0rem;
-        }
-        header {visibility: hidden;}  /* hides Streamlit's default header space */
-    </style>
+        .main { padding-left: 0rem !important; padding-right: 0rem !important; }
+        header { visibility: hidden; }
+        </style>
         """,
         unsafe_allow_html=True,
     )
 
+    # Tag filter state
     if "filter_tag" not in st.session_state:
         st.session_state.filter_tag = None
 
+    # ── Add Position ─────────────────────────────────────────────
     with st.expander("➕ Add Position", expanded=True):
         add_is_closed = st.checkbox("Mark as closed?", key="add_is_closed")
 
@@ -206,10 +229,11 @@ def main():
             st.success(f"Added {symbol}")
             st.rerun()
 
+    # ── Data ────────────────────────────────────────────────────
     positions = load_positions()
-    summary = load_summary()
     tags_summary = load_tag_summary()
 
+    # ── Tag Summary (filter) ────────────────────────────────────
     st.subheader("Tag Summary (click to filter)")
     hdr_tag, hdr_mv, hdr_pl, _ = st.columns([2.2, 1.2, 1.2, 0.4])
     hdr_tag.markdown("**Tag**")
@@ -233,31 +257,15 @@ def main():
     if st.session_state.filter_tag:
         positions = [p for p in positions if st.session_state.filter_tag in p.get("tags", [])]
 
-    st.subheader("Positions")
-
-    # Columns: Symbol | Name | Qty | Cost | Current | Invest | Value | P/L | Intraday | % | Tags | Actions
-    col_layout = [1.1, 3.2, 0.9, 1.0, 1.1, 1.1, 1.3, 1.1, 1.0, 1.0, 1.6, 0.7]
-    cols = st.columns(col_layout)
-    headers = [
-        "Symbol",
-        "Name",
-        "Qty",
-        "Cost",
-        "Current",
-        "Invest",
-        "Value",
-        "P/L",
-        "Intraday",
-        "%",
-        "Tags",
-        "",
-    ]
-    for col, header in zip(cols, headers):
-        col.markdown(f"**{header}**")
+    # ── Build rows & color-scale stats ──────────────────────────
+    rows = []
+    pnl_values = []
+    intraday_pcts = []  # collect INTRADAY % for the scale
+    total_invest_val = 0.0
+    total_mv_val = 0.0
 
     for pos in positions:
         is_closed = bool(pos.get("is_closed"))
-        # Price choice (closing if closed, else live)
         effective_price = float(
             pos.get("closing_price")
             if (is_closed and pos.get("closing_price") is not None)
@@ -268,11 +276,102 @@ def main():
         invest = qty * cost
         current_value = qty * effective_price
         pnl_value = current_value - invest
+        pnl_pct = (pnl_value / invest * 100.0) if invest else 0.0
 
-        # Intraday: hide when closed or missing
-        intraday = None if is_closed else pos.get("intraday_change")
+        # Intraday % for scale (only when open & present)
         intraday_pct = None if is_closed else pos.get("intraday_change_pct")
+        if intraday_pct is not None:
+            try:
+                intraday_pcts.append(float(intraday_pct))
+            except Exception:
+                pass
 
+        rows.append(
+            (
+                pos,
+                is_closed,
+                effective_price,
+                qty,
+                cost,
+                invest,
+                current_value,
+                pnl_value,
+                pnl_pct,
+                intraday_pct,
+            )
+        )
+        pnl_values.append(pnl_value)
+
+        total_invest_val += invest
+        total_mv_val += current_value
+
+    # P/L scale
+    if pnl_values:
+        vmin_pl = min(pnl_values)
+        vmax_pl = max(pnl_values)
+        vmed_pl = statistics.median(pnl_values)
+    else:
+        vmin_pl = vmax_pl = vmed_pl = 0.0
+
+    # Intraday % scale
+    if intraday_pcts:
+        vmin_idp = min(intraday_pcts)
+        vmax_idp = max(intraday_pcts)
+        vmed_idp = statistics.median(intraday_pcts)
+    else:
+        vmin_idp = vmax_idp = vmed_idp = 0.0
+
+    # ── Positions Table ─────────────────────────────────────────
+    st.subheader("Positions")
+
+    # Columns: Symbol | Name | Qty | Cost | Current | Invest | Value
+    # | P/L | P/L % | Intraday | Intraday % | Tags | Actions
+    col_layout = [
+        1.1,
+        3.2,
+        0.9,
+        1.0,
+        1.1,
+        1.1,
+        1.3,
+        1.1,
+        1.0,
+        1.0,
+        1.0,
+        1.6,
+        0.7,
+    ]
+    cols = st.columns(col_layout)
+    headers = [
+        "Symbol",
+        "Name",
+        "Qty",
+        "Cost",
+        "Current",
+        "Invest",
+        "Value",
+        "P/L",
+        "P/L %",
+        "Intraday",
+        "Intraday %",
+        "Tags",
+        "",
+    ]
+    for col, header in zip(cols, headers):
+        col.markdown(f"**{header}**")
+
+    for (
+        pos,
+        is_closed,
+        effective_price,
+        qty,
+        cost,
+        invest,
+        current_value,
+        pnl_value,
+        pnl_pct,
+        intraday_pct,
+    ) in rows:
         (
             c_sym,
             c_name,
@@ -282,54 +381,71 @@ def main():
             c_inv,
             c_val,
             c_pl,
+            c_plpct,
             c_iday,
             c_idaypct,
             c_tags,
             c_act,
         ) = st.columns(col_layout)
 
-        # Symbol with Yahoo link + tiny closed indicator (no extra height)
+        # Ticker link + closed icon
         sym_html = f"<a href='https://finance.yahoo.com/quote/{pos['symbol']}' target='_blank'>{pos['symbol']}</a>"
         closed_icon = " <span class='status-badge'>🔒</span>" if is_closed else ""
         c_sym.markdown(f"<div class='cell'>{sym_html}{closed_icon}</div>", unsafe_allow_html=True)
 
-        # Long name (no wrap)
+        # Long name (2 lines max)
         long_name = pos.get("long_name") or ""
         c_name.markdown(f"<div class='cell-wrap'>{long_name}</div>", unsafe_allow_html=True)
 
-        # Numbers (fixed 2 decimals in a no-wrap cell)
+        # Numeric basics
         c_qty.markdown(f"<div class='cell'>{fmt2(qty)}</div>", unsafe_allow_html=True)
         c_cost.markdown(f"<div class='cell'>{fmt2(cost)}</div>", unsafe_allow_html=True)
         c_cur.markdown(f"<div class='cell'>{fmt2(effective_price)}</div>", unsafe_allow_html=True)
         c_inv.markdown(f"<div class='cell'>{fmt2(invest)}</div>", unsafe_allow_html=True)
-        c_val.markdown(f"<div class='cell'>{fmt2(current_value)}</div>", unsafe_allow_html=True)
-        c_pl.markdown(f"<div class='cell'>{fmt2(pnl_value)}</div>", unsafe_allow_html=True)
-
-        # Intraday cells (— when closed or missing). Color green/red if present.
-        intraday = None if is_closed else pos.get("intraday_change")
-        intraday_pct = None if is_closed else pos.get("intraday_change_pct")
-
-        if intraday is None:
-            c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        # Current Value: hide for closed positions
+        if is_closed:
+            c_val.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
         else:
-            intraday_class = "pos-green" if float(intraday) >= 0 else "pos-red"
-            c_iday.markdown(
-                f"<div class='cell {intraday_class}'>{fmt2(intraday)}</div>", unsafe_allow_html=True
-            )
-
-        if intraday_pct is None:
-            c_idaypct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
-        else:
-            intraday_pct_class = "pos-green" if float(intraday_pct) >= 0 else "pos-red"
-            c_idaypct.markdown(
-                f"<div class='cell {intraday_pct_class}'>{float(intraday_pct):.2f}%</div>",
+            c_val.markdown(
+                f"<div class='cell'>{fmt2(current_value)}</div>",
                 unsafe_allow_html=True,
             )
+        # P/L (colored scale)
+        c_pl.markdown(
+            f"<div class='cell' style='{_color_from_scale(pnl_value, vmin_pl, vmed_pl, vmax_pl)}'>"
+            f"{fmt2(pnl_value)}</div>",
+            unsafe_allow_html=True,
+        )
+        # P/L % (plain text)
+        c_plpct.markdown(f"<div class='cell'>{pnl_pct:.2f}%</div>", unsafe_allow_html=True)
+
+        # Intraday absolute (red/green text or em dash if closed/missing)
+        intraday_abs = None if is_closed else pos.get("intraday_change")
+        if intraday_abs is None:
+            c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        else:
+            intraday_class = "pos-green" if float(intraday_abs) >= 0 else "pos-red"
+            c_iday.markdown(
+                f"<div class='cell {intraday_class}'>{fmt2(intraday_abs)}</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Intraday % (colored scale)
+        if (intraday_pct is None) or is_closed:
+            c_idaypct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        else:
+            intraday_pct_val = float(intraday_pct)
+            c_idaypct.markdown(
+                f"<div class='cell' style='{_color_from_scale(intraday_pct_val, vmin_idp, vmed_idp, vmax_idp)}'>"
+                f"{intraday_pct_val:.2f}%</div>",
+                unsafe_allow_html=True,
+            )
+
         # Tags
         badges = " ".join(f"<span class='tag-badge'>{t}</span>" for t in pos.get("tags", []))
         c_tags.markdown(f"<div class='cell'>{badges}</div>", unsafe_allow_html=True)
 
-        # Actions: icon-only, side-by-side (no labels)
+        # Actions (icons only)
         with c_act.container():
             b_edit, b_del = st.columns([1, 1])
             if b_edit.button("✏️", key=f"edit_{pos['_id']}"):
@@ -342,10 +458,34 @@ def main():
                 except Exception as e:
                     st.error(f"Error deleting: {e}")
 
+    # ── Totals ─────────────────────────────────────────────────
     st.subheader("Totals")
-    col_mv, col_pl = st.columns(2)
-    col_mv.metric("Total Market Value", fmt2(summary.get("total_market_value", 0.0)))
-    col_pl.metric("Total Unrealized P/L", fmt2(summary.get("total_unrealized_pl", 0.0)))
+
+    # Total Invest (ALL positions, open + closed)
+    total_invest_all = sum(
+        float(p.get("quantity", 0.0)) * float(p.get("cost_price", 0.0)) for p in positions
+    )
+
+    # Total Market Value (OPEN positions only, use live/current price)
+    total_mv_open = 0.0
+    for p in positions:
+        if bool(p.get("is_closed")):
+            continue
+        qty = float(p.get("quantity", 0.0))
+        price = float(p.get("current_price") or 0.0)
+        total_mv_open += qty * price
+
+    # P/L (Open vs Invest All) and % vs Invest All (based on MV_open and Invest_all)
+    pl_open_vs_invest_all = total_mv_open - total_invest_all
+    pl_pct_vs_invest_all = (
+        ((total_mv_open - total_invest_all) / total_invest_all) * 100.0 if total_invest_all else 0.0
+    )
+
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Total Invest (All)", fmt2(total_invest_all))
+    t2.metric("Total Market Value (Open)", fmt2(total_mv_open))
+    t3.metric("P/L (Open vs Invest All)", fmt2(pl_open_vs_invest_all))
+    t4.metric("P/L % (vs Invest All)", f"{pl_pct_vs_invest_all:.2f}%")
 
 
 if __name__ == "__main__":
