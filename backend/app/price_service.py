@@ -64,11 +64,17 @@ async def get_prices(symbols: List[str]) -> Dict[str, Dict]:
             info = getattr(t, "info", {}) or {}
             long_name = info.get("longName") or info.get("shortName")
 
+            # NEW: currency (fast_info first, then info)
+            currency = (fast.get("currency") if isinstance(fast, dict) else None) or info.get(
+                "currency"
+            )
+
             out[s] = {
                 "current": current,
                 "change": change,
                 "change_pct": change_pct,  # <- now a real percent (1.27, not 0.0127)
                 "long_name": long_name,
+                "currency": currency,  # <-- NEW
             }
         except Exception:
             out[s] = {"current": None, "change": None, "change_pct": None, "long_name": None}

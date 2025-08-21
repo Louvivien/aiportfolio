@@ -100,6 +100,7 @@ async def read_positions():
         d["long_name"] = p.get("long_name")
         d["intraday_change"] = p.get("change")
         d["intraday_change_pct"] = p.get("change_pct")
+        d["currency"] = p.get("currency")  # <-- NEW
 
         d["tags"] = await _get_tag_names(d.get("tags", []))
         d = _stringify_id(d)
@@ -140,6 +141,7 @@ async def create_position(position: PositionCreate):
     new["long_name"] = p.get("long_name")
     new["intraday_change"] = p.get("change")
     new["intraday_change_pct"] = p.get("change_pct")
+    new["currency"] = p.get("currency")  # <-- NEW
 
     new["tags"] = await _get_tag_names(new.get("tags", []))
     new = _stringify_id(new)
@@ -187,6 +189,8 @@ async def update_position(position_id: str, patch: PositionUpdate):
     doc["long_name"] = p.get("long_name")
     doc["intraday_change"] = p.get("change")
     doc["intraday_change_pct"] = p.get("change_pct")
+    doc["currency"] = p.get("currency")  # <-- NEW
+
     doc["tags"] = await _get_tag_names(doc.get("tags", []))
     doc = _stringify_id(doc)
     return PositionModel(**doc)

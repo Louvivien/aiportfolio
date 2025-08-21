@@ -29,16 +29,15 @@ class PositionUpdate(BaseModel):
 
 
 class PositionModel(BaseModel):
-    id: str = Field(alias="_id")  # ✅ use alias for Mongo _id
+    id: str | None = Field(alias="_id", default=None)
     symbol: str
     quantity: float
     cost_price: float
-    tags: List[str] = []
-    current_price: float = 0.0
-    is_closed: bool = False
-    closing_price: Optional[float] = None
-
-    # Enrichment
+    current_price: float | None = None
     long_name: Optional[str] = None
     intraday_change: Optional[float] = None
     intraday_change_pct: Optional[float] = None
+    currency: Optional[str] = None  # <-- NEW
+    tags: list[str] = []
+    is_closed: bool = False
+    closing_price: float | None = None

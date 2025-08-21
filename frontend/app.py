@@ -9,6 +9,30 @@ from streamlit_tags import st_tags
 
 API_URL = "http://127.0.0.1:8000"
 
+CURRENCY_SYMBOLS = {
+    "USD": "$",
+    "EUR": "€",
+    "GBP": "£",
+    "JPY": "¥",
+    "CHF": "CHF",
+    "CAD": "C$",
+    "AUD": "A$",
+    "HKD": "HK$",
+    "CNY": "¥",
+    "SEK": "kr",
+    "NOK": "kr",
+    "DKK": "kr",
+}
+
+
+def fmt_money(amount: float | None, currency: str | None) -> str:
+    if amount is None:
+        return "—"
+    s = fmt2(amount)
+    cur = (currency or "").upper()
+    sym = CURRENCY_SYMBOLS.get(cur)
+    return f"{sym}{s}" if sym else (f"{s} {cur}" if cur else s)
+
 
 def fmt2(x) -> str:
     """Format any number to 2 decimals; otherwise '0.00'."""
@@ -444,6 +468,97 @@ def main():
     # ── Positions Table ─────────────────────────────────────────
     st.subheader("Positions")
 
+    # ── Sort controls (clickable headers with arrows) ───────────
+    if "sort_by" not in st.session_state:
+        st.session_state.sort_by = None
+        st.session_state.sort_desc = False
+
+    # Which headers are sortable (no Actions)
+    header_labels = [
+        "Symbol",
+        "Name",
+        "Qty",
+        "Cost",
+        "Current",
+        "Invest",
+        "Value",
+        "P/L",
+        "P/L %",
+        "Intraday",
+        "Intraday %",
+        "Tags",
+    ]
+
+    def _toggle_sort(column: str):
+        if st.session_state.sort_by == column:
+            st.session_state.sort_desc = not st.session_state.sort_desc
+        else:
+            st.session_state.sort_by = column
+            st.session_state.sort_desc = False
+
+    def _with_arrow(name: str) -> str:
+        """Return header text with ▲/▼ if active."""
+        if st.session_state.sort_by == name:
+            return f"{name} {'▼' if st.session_state.sort_desc else '▲'}"
+        return name
+
+    # Header row: clickable buttons (no Actions column here)
+    header_layout = [1.1, 3.2, 0.9, 1.0, 1.1, 1.1, 1.3, 1.1, 1.0, 1.0, 1.0, 1.6]
+    hdr_cols = st.columns(header_layout)
+    for col, header in zip(hdr_cols, header_labels):
+        if col.button(_with_arrow(header), key=f"hdr_{header}"):
+            _toggle_sort(header)
+
+    # Reset to original DB order
+    if st.button("🔄 Reset Order"):
+        st.session_state.sort_by = None
+        st.session_state.sort_desc = False
+
+    # Apply sorting if active (uses your existing `rows` list)
+    def _row_value(row):
+        # rows: (pos, is_closed, effective_price, qty, cost, invest,
+        #        current_value, pnl_value, pnl_pct, intraday_pct)
+        pos, is_closed, eff, qty, cost, invest, curval, plv, plpct, idpct = row
+        tags_joined = ", ".join(pos.get("tags", [])) if pos.get("tags") else ""
+        sb = st.session_state.sort_by
+        if sb == "Symbol":
+            return (pos.get("symbol") or "").upper()
+        if sb == "Name":
+            return (pos.get("long_name") or "").upper()
+        if sb == "Qty":
+            return qty
+        if sb == "Cost":
+            return cost
+        if sb == "Current":
+            return eff
+        if sb == "Invest":
+            return invest
+        if sb == "Value":
+            return None if is_closed else curval
+        if sb == "P/L":
+            return plv
+        if sb == "P/L %":
+            return plpct
+        if sb == "Intraday":
+            return None if is_closed else pos.get("intraday_change")
+        if sb == "Intraday %":
+            return None if is_closed else idpct
+        if sb == "Tags":
+            return tags_joined.upper()
+        return None
+
+    def _safe_key(v):
+        # Sort robustly across None/str/float
+        try:
+            return (False, float(v))
+        except Exception:
+            if isinstance(v, str):
+                return (False, v)
+            return (True, 0.0)
+
+    if st.session_state.sort_by:
+        rows.sort(key=lambda r: _safe_key(_row_value(r)), reverse=st.session_state.sort_desc)
+
     # Columns: Symbol | Name | Qty | Cost | Current | Invest | Value
     # | P/L | P/L % | Intraday | Intraday % | Tags | Actions
     col_layout = [
@@ -519,21 +634,30 @@ def main():
 
         # Numeric basics
         c_qty.markdown(f"<div class='cell'>{fmt2(qty)}</div>", unsafe_allow_html=True)
-        c_cost.markdown(f"<div class='cell'>{fmt2(cost)}</div>", unsafe_allow_html=True)
-        c_cur.markdown(f"<div class='cell'>{fmt2(effective_price)}</div>", unsafe_allow_html=True)
-        c_inv.markdown(f"<div class='cell'>{fmt2(invest)}</div>", unsafe_allow_html=True)
+        c_cost.markdown(
+            f"<div class='cell'>{fmt_money(cost, pos.get('currency'))}</div>",
+            unsafe_allow_html=True,
+        )
+        c_cur.markdown(
+            f"<div class='cell'>{fmt_money(effective_price, pos.get('currency'))}</div>",
+            unsafe_allow_html=True,
+        )
+        c_inv.markdown(
+            f"<div class='cell'>{fmt_money(invest, pos.get('currency'))}</div>",
+            unsafe_allow_html=True,
+        )
         # Current Value: hide for closed positions
         if is_closed:
             c_val.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
         else:
             c_val.markdown(
-                f"<div class='cell'>{fmt2(current_value)}</div>",
+                f"<div class='cell'>{fmt_money(current_value, pos.get('currency'))}</div>",
                 unsafe_allow_html=True,
             )
         # P/L (colored scale)
         c_pl.markdown(
             f"<div class='cell' style='{_color_from_scale(pnl_value, vmin_pl, vmed_pl, vmax_pl)}'>"
-            f"{fmt2(pnl_value)}</div>",
+            f"{fmt_money(pnl_value, pos.get('currency'))}</div>",
             unsafe_allow_html=True,
         )
         # P/L % (plain text)
