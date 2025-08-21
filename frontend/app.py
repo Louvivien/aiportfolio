@@ -540,7 +540,13 @@ def main():
         if sb == "P/L %":
             return plpct
         if sb == "Intraday":
-            return None if is_closed else pos.get("intraday_change")
+            if is_closed:
+                return None
+            ch = pos.get("intraday_change")
+            try:
+                return float(ch) * float(qty)  # sort by absolute intraday value (per-share × qty)
+            except (TypeError, ValueError):
+                return None
         if sb == "Intraday %":
             return None if is_closed else idpct
         if sb == "Tags":
@@ -671,7 +677,7 @@ def main():
         else:
             intraday_class = "pos-green" if intraday_abs >= 0 else "pos-red"
             c_iday.markdown(
-                f"<div class='cell {intraday_class}'>{fmt2(intraday_abs)}</div>",
+                f"<div class='cell {intraday_class}'>{fmt_money(intraday_abs, pos.get('currency'))}</div>",
                 unsafe_allow_html=True,
             )
         # Intraday % (colored scale using asymmetric intraday palette)
