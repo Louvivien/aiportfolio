@@ -356,16 +356,32 @@ def main():
     else:
         vmin_tag = vmax_tag = 0.0  # fallback when no data
 
+    # 10D % scale for tags
+    ten_tag_values = []
+    for t in tags_summary:
+        v = t.get("change_10d_pct")
+        try:
+            if v is not None:
+                ten_tag_values.append(float(v))
+        except Exception:
+            pass
+    if ten_tag_values:
+        vmin_tag10 = min(ten_tag_values)
+        vmax_tag10 = max(ten_tag_values)
+    else:
+        vmin_tag10 = vmax_tag10 = 0.0
+
     # Header row (add Intraday % as a narrow column)
-    hdr_tag, hdr_mv, hdr_pl, hdr_iday, _ = st.columns([2.2, 1.2, 1.2, 0.9, 0.4])
+    hdr_tag, hdr_mv, hdr_pl, hdr_iday, hdr_10d, _ = st.columns([2.2, 1.2, 1.2, 0.9, 0.9, 0.4])
     hdr_tag.markdown("**Tag**")
     hdr_mv.markdown("**Market Value**")
     hdr_pl.markdown("**Unrealized P/L**")
     hdr_iday.markdown("**Intraday %**")
+    hdr_10d.markdown("**10D %**")
 
     # Data rows
     for t in tags_summary:
-        c_tag, c_mv, c_pl, c_iday, c_sp = st.columns([2.2, 1.2, 1.2, 0.9, 0.4])
+        c_tag, c_mv, c_pl, c_iday, c_10d, c_sp = st.columns([2.2, 1.2, 1.2, 0.9, 0.9, 0.4])
 
         # Tag as a filter button
         if c_tag.button(t["tag"], key=f"filter_{t['tag']}"):
@@ -389,6 +405,21 @@ def main():
                 )
             except Exception:
                 c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+
+        # 10D % (same asymmetric palette: negatives never green)
+        t10 = t.get("change_10d_pct")
+        if t10 is None:
+            c_10d.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        else:
+            try:
+                t10f = float(t10)
+                style10 = _color_from_scale_intraday(t10f, vmin_tag10, vmax_tag10)
+                c_10d.markdown(
+                    f"<div class='cell' style='{style10}'>{t10f:.2f}%</div>",
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                c_10d.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
 
         c_sp.write("")
 

@@ -23,6 +23,9 @@ app.add_middleware(
 )
 
 
+# ──────────────────────────
+# Helpers
+# ──────────────────────────
 def _oid(s: Union[str, ObjectId]) -> Union[ObjectId, str]:
     if isinstance(s, ObjectId):
         return s
@@ -69,23 +72,32 @@ async def _upsert_tags_return_ids(names: List[str]) -> List[ObjectId]:
     return out
 
 
+# ──────────────────────────
+# Tags
+# ──────────────────────────
 @app.get("/tags", response_model=List[TagModel])
 async def read_tags():
     docs = await db.tags.find().to_list(None)
     return [TagModel(id=str(d["_id"]), name=d["name"]) for d in docs]
 
 
+# ──────────────────────────
+# Positions (CRUD + enrich)
+# ──────────────────────────
 @app.get("/positions", response_model=List[PositionModel])
 async def read_positions():
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
 
     try:
+        # price_map[sym] = {
+        #   "current", "change", "change_pct", "long_name", "currency", "price_10d"
+        # }
         price_map = await get_prices(symbols)
     except Exception:
         price_map = {s: {} for s in symbols}
 
-    out = []
+    out: List[PositionModel] = []
     for d in docs:
         sym = d["symbol"].upper()
         p = price_map.get(sym, {})
@@ -99,10 +111,9 @@ async def read_positions():
         # enrich from price map
         d["long_name"] = p.get("long_name")
         d["intraday_change"] = p.get("change")
-        d["intraday_change_pct"] = p.get("change_pct")
-        d["currency"] = p.get("currency")  # <-- NEW
-        d["price_10d"] = p.get("price_10d")
-        d["change_10d_pct"] = p.get("change_10d_pct")
+        d["intraday_change_pct"] = p.get("change_pct")  # already in percent units (e.g. 1.27)
+        d["currency"] = p.get("currency")
+        d["price_10d"] = p.get("price_10d")  # for front-end debug if needed
 
         d["tags"] = await _get_tag_names(d.get("tags", []))
         d = _stringify_id(d)
@@ -143,7 +154,8 @@ async def create_position(position: PositionCreate):
     new["long_name"] = p.get("long_name")
     new["intraday_change"] = p.get("change")
     new["intraday_change_pct"] = p.get("change_pct")
-    new["currency"] = p.get("currency")  # <-- NEW
+    new["currency"] = p.get("currency")
+    new["price_10d"] = p.get("price_10d")
 
     new["tags"] = await _get_tag_names(new.get("tags", []))
     new = _stringify_id(new)
@@ -191,16 +203,25 @@ async def update_position(position_id: str, patch: PositionUpdate):
     doc["long_name"] = p.get("long_name")
     doc["intraday_change"] = p.get("change")
     doc["intraday_change_pct"] = p.get("change_pct")
-    doc["currency"] = p.get("currency")  # <-- NEW
+    doc["currency"] = p.get("currency")
+    doc["price_10d"] = p.get("price_10d")
 
     doc["tags"] = await _get_tag_names(doc.get("tags", []))
     doc = _stringify_id(doc)
     return PositionModel(**doc)
 
 
-# ──────────────────────────────────────────────────────────────
+@app.delete("/positions/{position_id}")
+async def delete_position(position_id: str):
+    res = await db.positions.delete_one({"_id": _oid(position_id)})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Position not found")
+    return {"ok": True}
+
+
+# ──────────────────────────
 # Portfolio summary
-# ──────────────────────────────────────────────────────────────
+# ──────────────────────────
 @app.get("/positions/summary")
 async def positions_summary():
     """
@@ -209,7 +230,6 @@ async def positions_summary():
     """
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
-
     try:
         price_map = await get_prices(symbols)  # {SYM: {"current": ..., ...}}
     except Exception:
@@ -229,26 +249,83 @@ async def positions_summary():
             continue
         qty = float(d.get("quantity", 0.0))
         cost = float(d.get("cost_price", 0.0))
-        total_mv += price * qty
-        total_pl += (price - cost) * qty
+        total_mv += float(price) * qty
+        total_pl += (float(price) - cost) * qty
 
     return {"total_market_value": total_mv, "total_unrealized_pl": total_pl}
 
 
-# ADD THIS near the other routes in backend/app/main.py
-
-
-@app.get("/positions/tags/summary")
-async def positions_tags_summary():
+@app.get("/positions/summary/debug")
+async def positions_summary_debug():
+    """
+    Per-position contribution to Total Market Value for OPEN positions only.
+    """
     docs = await db.positions.find().to_list(1000)
     symbols = sorted({d["symbol"].upper() for d in docs})
-
     try:
-        price_map = await get_prices(symbols)  # {SYM: {"current": ..., "change_pct": ...}}
+        price_map = await get_prices(symbols)  # {SYM: {"current": ...}}
     except Exception:
         price_map = {s: {} for s in symbols}
 
-    # tag_id -> tag name
+    rows = []
+    total = 0.0
+    for d in docs:
+        if _as_true(d.get("is_closed", False)):
+            continue
+
+        sym = d["symbol"].upper()
+        qty = float(d.get("quantity", 0.0))
+        price = price_map.get(sym, {}).get("current")
+        if price is None:
+            rows.append(
+                {
+                    "symbol": sym,
+                    "qty": qty,
+                    "used_price": None,
+                    "subtotal": 0.0,
+                    "note": "missing live price",
+                }
+            )
+            continue
+
+        price_f = float(price)
+        subtotal = price_f * qty
+        total += subtotal
+        rows.append(
+            {
+                "symbol": sym,
+                "qty": qty,
+                "used_price": price_f,
+                "subtotal": subtotal,
+                "note": "",
+            }
+        )
+
+    return {"total_market_value": total, "rows": rows}
+
+
+# ──────────────────────────
+# Tag summary (open-only), with Intraday % and 10D %
+# ──────────────────────────
+@app.get("/positions/tags/summary")
+async def positions_tags_summary():
+    """
+    Aggregate open positions by tag:
+      - total_quantity
+      - total_market_value (Σ qty*current)
+      - total_unrealized_pl (Σ (current-cost)*qty)
+      - intraday_change_pct (weighted by previous close MV)
+      - change_10d_pct (weighted by 10d-ago MV)
+    """
+    docs = await db.positions.find().to_list(1000)
+    symbols = sorted({d["symbol"].upper() for d in docs})
+    try:
+        # price_map[sym] = { current, change, change_pct, price_10d, ... }
+        price_map = await get_prices(symbols)
+    except Exception:
+        price_map = {s: {} for s in symbols}
+
+    # Map tag_id -> tag name
     all_tag_ids = {tid for d in docs for tid in d.get("tags", [])}
     tag_docs = await db.tags.find({"_id": {"$in": list(all_tag_ids)}}).to_list(None)
     tag_map = {t["_id"]: t["name"] for t in tag_docs}
@@ -256,38 +333,29 @@ async def positions_tags_summary():
     out: dict[str, dict] = {}
 
     for d in docs:
-        # only OPEN positions contribute
-        if bool(d.get("is_closed", False)):
+        # Only OPEN positions contribute
+        if _as_true(d.get("is_closed", False)):
             continue
 
         sym = d["symbol"].upper()
         p = price_map.get(sym, {})
+
         current = p.get("current")
-        change_pct = p.get("change_pct")  # e.g., 1.27 means +1.27%
+        change = p.get("change")
+        price_10d = p.get("price_10d")
 
         if current is None:
             continue
 
         qty = float(d.get("quantity", 0.0))
         cost = float(d.get("cost_price", 0.0))
-        mv = float(current) * qty
-        pl = (float(current) - cost) * qty
 
-        # For weighted intraday %: reconstruct yesterday's close
-        # prev_close = current / (1 + change_pct/100)
-        base_prev = None
-        delta_today = None
-        if change_pct is not None:
-            try:
-                cp = float(change_pct)
-                curr_f = float(current)
-                prev_close = curr_f / (1.0 + cp / 100.0) if cp > -100.0 else None
-                if prev_close and prev_close > 0:
-                    base_prev = prev_close * qty
-                    delta_today = (curr_f - prev_close) * qty
-            except Exception:
-                base_prev = None
-                delta_today = None
+        # MV now / previous close / 10d-ago
+        mv_now = float(current) * qty
+        mv_prev = (float(current) - float(change)) * qty if (change not in (None, 0)) else None
+        mv_10d = (float(price_10d) * qty) if (price_10d not in (None, 0)) else None
+
+        pl = (float(current) - cost) * qty
 
         for tid in d.get("tags", []):
             name = tag_map.get(tid)
@@ -301,29 +369,47 @@ async def positions_tags_summary():
                     "total_quantity": 0.0,
                     "total_market_value": 0.0,
                     "total_unrealized_pl": 0.0,
-                    # accumulators for weighted intraday %
-                    "_iday_base": 0.0,  # sum of previous-close market values
-                    "_iday_delta": 0.0,  # sum of (today - prev) market deltas
+                    # accumulate bases for weighted % computations
+                    "_mv_prev_base": 0.0,  # denominator for intraday %
+                    "_mv_prev_now": 0.0,  # numerator addend: mv_now - mv_prev
+                    "_mv_10d_base": 0.0,  # denominator for 10d %
+                    "_mv_10d_now": 0.0,  # numerator addend: mv_now - mv_10d
                 },
             )
 
             bucket["total_quantity"] += qty
-            bucket["total_market_value"] += mv
+            bucket["total_market_value"] += mv_now
             bucket["total_unrealized_pl"] += pl
 
-            if base_prev is not None and delta_today is not None:
-                bucket["_iday_base"] += base_prev
-                bucket["_iday_delta"] += delta_today
+            # Intraday % base (Σ (mv_now - mv_prev) / Σ mv_prev)
+            if mv_prev is not None and mv_prev != 0:
+                bucket["_mv_prev_base"] += mv_prev
+                bucket["_mv_prev_now"] += mv_now - mv_prev
 
-    # finalize intraday % per tag
+            # 10D % base (Σ (mv_now - mv_10d) / Σ mv_10d)
+            if mv_10d is not None and mv_10d != 0:
+                bucket["_mv_10d_base"] += mv_10d
+                bucket["_mv_10d_now"] += mv_now - mv_10d
+
+    # Finalize percentages
     result = []
-    for name, b in out.items():
-        base = b.pop("_iday_base", 0.0)
-        delta = b.pop("_iday_delta", 0.0)
-        if base > 0:
-            b["intraday_change_pct"] = (delta / base) * 100.0
+    for b in out.values():
+        # Intraday %
+        prev_den = b.pop("_mv_prev_base", 0.0)
+        prev_num = b.pop("_mv_prev_now", 0.0)
+        if prev_den:
+            b["intraday_change_pct"] = (prev_num / prev_den) * 100.0
         else:
             b["intraday_change_pct"] = None
+
+        # 10D %
+        ten_den = b.pop("_mv_10d_base", 0.0)
+        ten_num = b.pop("_mv_10d_now", 0.0)
+        if ten_den:
+            b["change_10d_pct"] = (ten_num / ten_den) * 100.0
+        else:
+            b["change_10d_pct"] = None
+
         result.append(b)
 
     return result
