@@ -707,7 +707,6 @@ def main():
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error deleting: {e}")
-
     # ── Totals ─────────────────────────────────────────────────
     st.subheader("Totals")
 
@@ -716,8 +715,9 @@ def main():
         float(p.get("quantity", 0.0)) * float(p.get("cost_price", 0.0)) for p in positions
     )
 
-    # Total Market Value (OPEN positions only, use live/current price)
+    # Totals for OPEN positions only
     total_mv_open = 0.0
+    intraday_abs_sum = 0.0  # total absolute intraday change (in EUR)
     for p in positions:
         if bool(p.get("is_closed")):
             continue
@@ -725,17 +725,39 @@ def main():
         price = float(p.get("current_price") or 0.0)
         total_mv_open += qty * price
 
-    # P/L (Open vs Invest All) and % vs Invest All (based on MV_open and Invest_all)
+        # intraday absolute change for this position (per-share change × qty)
+        ch = p.get("intraday_change")
+        if ch is not None:
+            try:
+                intraday_abs_sum += float(ch) * qty
+            except Exception:
+                pass
+
+    # P/L (Open vs Invest All) and % vs Invest All
     pl_open_vs_invest_all = total_mv_open - total_invest_all
     pl_pct_vs_invest_all = (
         ((total_mv_open - total_invest_all) / total_invest_all) * 100.0 if total_invest_all else 0.0
     )
 
+    # Portfolio intraday % (weighted by open positions)
+    portfolio_intraday_pct = (intraday_abs_sum / total_mv_open * 100.0) if total_mv_open else 0.0
+
+    # Totals (formatted in EUR)
     t1, t2, t3, t4 = st.columns(4)
-    t1.metric("Total Invest (All)", fmt2(total_invest_all))
-    t2.metric("Total Market Value (Open)", fmt2(total_mv_open))
-    t3.metric("P/L (Open vs Invest All)", fmt2(pl_open_vs_invest_all))
+    t1.metric("Total Invest (All)", fmt_money(total_invest_all, "EUR"))
+    t2.metric("Total Market Value (Open)", fmt_money(total_mv_open, "EUR"))
+    t3.metric("P/L (Open vs Invest All)", fmt_money(pl_open_vs_invest_all, "EUR"))
     t4.metric("P/L % (vs Invest All)", f"{pl_pct_vs_invest_all:.2f}%")
+
+    # Compact intraday badge with amount and percentage
+    badge_bg = _GS_GRN if portfolio_intraday_pct >= 0 else _GS_RED
+    st.markdown(
+        f"<div style='display:inline-block; margin-top:4px; "
+        f"padding:2px 8px; border-radius:6px; font-weight:600; "
+        f"color:white; background:{badge_bg};'>"
+        f"Intraday (Open): {fmt_money(intraday_abs_sum, 'EUR')} ({portfolio_intraday_pct:+.2f}%)</div>",
+        unsafe_allow_html=True,
+    )
 
 
 if __name__ == "__main__":
