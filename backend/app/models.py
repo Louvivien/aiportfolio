@@ -38,6 +38,8 @@ class PositionModel(BaseModel):
     intraday_change: Optional[float] = None
     intraday_change_pct: Optional[float] = None
     currency: Optional[str] = None  # <-- NEW
+    price_10d: Optional[float] = None
+    change_10d_pct: Optional[float] = None
     tags: list[str] = []
     is_closed: bool = False
     closing_price: float | None = None

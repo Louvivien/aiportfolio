@@ -34,8 +34,11 @@ async def get_prices(symbols: List[str]) -> Dict[str, Dict]:
     Return a dict keyed by uppercased symbol with:
       - current: last traded price
       - change:  absolute intraday change (current - previous_close)
-      - change_pct: intraday percent change **in percent units** (e.g. 1.27 for +1.27%)
+      - change_pct: intraday percent change in percent units (e.g. 1.27)
       - long_name: security long name (best-effort)
+      - currency: trading currency (e.g. 'EUR', 'USD')
+      - price_10d: close price ~10 trading days ago (best-effort)
+      - change_10d_pct: (current / price_10d - 1) * 100
     """
     out: Dict[str, Dict] = {}
 
@@ -44,39 +47,69 @@ async def get_prices(symbols: List[str]) -> Dict[str, Dict]:
         try:
             t = yf.Ticker(raw)
 
-            # Prefer fast_info when available (fewer API calls)
+            # --- Fast/live ---
             fast = getattr(t, "fast_info", None) or {}
             current = _to_float(fast.get("last_price") or fast.get("lastPrice") or fast.get("last"))
             prev = _to_float(fast.get("previous_close") or fast.get("previousClose"))
+            currency = fast.get("currency")
 
-            # Fallback to .info if fast_info is missing anything
-            if current is None or prev is None:
-                info = t.info or {}
-                current = current or _to_float(info.get("regularMarketPrice"))
-                prev = prev or _to_float(info.get("regularMarketPreviousClose"))
-
-            change = (current - prev) if (current is not None and prev is not None) else None
-            change_pct = (
-                (change / prev * 100.0) if (change is not None and prev not in (None, 0)) else None
-            )
-
-            # Long name best-effort
+            # Fallbacks via .info
             info = getattr(t, "info", {}) or {}
+            if current is None:
+                current = _to_float(info.get("regularMarketPrice"))
+            if prev is None:
+                prev = _to_float(info.get("regularMarketPreviousClose"))
+            if not currency:
+                currency = info.get("currency")
             long_name = info.get("longName") or info.get("shortName")
 
-            # NEW: currency (fast_info first, then info)
-            currency = (fast.get("currency") if isinstance(fast, dict) else None) or info.get(
-                "currency"
+            # Intraday deltas
+            change = (current - prev) if (current is not None and prev is not None) else None
+            change_pct = (
+                ((change / prev) * 100.0)
+                if (change is not None and prev not in (None, 0))
+                else None
+            )
+
+            # --- 10 trading days ago close (best-effort) ---
+            price_10d = None
+            try:
+                hist = t.history(period="30d", interval="1d")  # enough to cover 10 sessions
+                closes = hist["Close"].dropna()
+                # Use the close 10 trading sessions before the last available close
+                # (e.g., -11 index if we consider last close as -1)
+                if len(closes) >= 11:
+                    price_10d = float(closes.iloc[-11])
+                elif len(closes) >= 2:
+                    # fallback: oldest available (short history)
+                    price_10d = float(closes.iloc[0])
+            except Exception:
+                price_10d = None
+
+            change_10d_pct = (
+                ((current / price_10d) - 1.0) * 100.0
+                if (current not in (None, 0) and price_10d not in (None, 0))
+                else None
             )
 
             out[s] = {
                 "current": current,
                 "change": change,
-                "change_pct": change_pct,  # <- now a real percent (1.27, not 0.0127)
+                "change_pct": change_pct,
                 "long_name": long_name,
-                "currency": currency,  # <-- NEW
+                "currency": currency,
+                "price_10d": price_10d,
+                "change_10d_pct": change_10d_pct,
             }
         except Exception:
-            out[s] = {"current": None, "change": None, "change_pct": None, "long_name": None}
+            out[s] = {
+                "current": None,
+                "change": None,
+                "change_pct": None,
+                "long_name": None,
+                "currency": None,
+                "price_10d": None,
+                "change_10d_pct": None,
+            }
 
     return out

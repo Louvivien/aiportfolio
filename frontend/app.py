@@ -465,6 +465,21 @@ def main():
     else:
         vmin_idp = vmax_idp = 0.0
 
+    # 10D % scale (for table color)
+    ten_day_pcts = []
+    for pos, is_closed, _, qty, _, _, _, _, _, _ in rows:
+        v = None if is_closed else pos.get("change_10d_pct")
+        try:
+            if v is not None:
+                ten_day_pcts.append(float(v))
+        except Exception:
+            pass
+    if ten_day_pcts:
+        vmin_10d = min(ten_day_pcts)
+        vmax_10d = max(ten_day_pcts)
+    else:
+        vmin_10d = vmax_10d = 0.0
+
     # ── Positions Table ─────────────────────────────────────────
     st.subheader("Positions")
 
@@ -486,6 +501,7 @@ def main():
         "P/L %",
         "Intraday",
         "Intraday %",
+        "10D %",
         "Tags",
     ]
 
@@ -549,6 +565,8 @@ def main():
                 return None
         if sb == "Intraday %":
             return None if is_closed else idpct
+        if sb == "10D %":
+            return None if is_closed else pos.get("change_10d_pct")
         if sb == "Tags":
             return tags_joined.upper()
         return None
@@ -568,19 +586,20 @@ def main():
     # Columns: Symbol | Name | Qty | Cost | Current | Invest | Value
     # | P/L | P/L % | Intraday | Intraday % | Tags | Actions
     col_layout = [
-        1.1,
-        3.2,
-        0.9,
-        1.0,
-        1.1,
-        1.1,
-        1.3,
-        1.1,
-        1.0,
-        1.0,
-        1.0,
-        1.6,
-        0.7,
+        1.1,  # Symbol
+        3.2,  # Name
+        0.9,  # Qty
+        1.0,  # Cost
+        1.1,  # Current
+        1.1,  # Invest
+        1.3,  # Value
+        1.1,  # P/L
+        1.0,  # P/L %
+        1.0,  # Intraday
+        1.0,  # Intraday %
+        1.0,  # 10D %
+        1.6,  # Tags
+        0.7,  # Actions
     ]
     cols = st.columns(col_layout)
     headers = [
@@ -595,6 +614,7 @@ def main():
         "P/L %",
         "Intraday",
         "Intraday %",
+        "10D %",
         "Tags",
         "",
     ]
@@ -625,6 +645,7 @@ def main():
             c_plpct,
             c_iday,
             c_idaypct,
+            c_10dpct,
             c_tags,
             c_act,
         ) = st.columns(col_layout)
@@ -680,6 +701,23 @@ def main():
                 f"<div class='cell {intraday_class}'>{fmt_money(intraday_abs, pos.get('currency'))}</div>",
                 unsafe_allow_html=True,
             )
+
+        # 10D % (colored scale like intraday but 10-day window)
+        ten_pct = None if is_closed else pos.get("change_10d_pct")
+        if ten_pct is None:
+            c_10dpct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+        else:
+            try:
+                ten_val = float(ten_pct)
+                # reuse intraday asymmetric palette (never green for negatives)
+                style_10 = _color_from_scale_intraday(ten_val, vmin_10d, vmax_10d)
+                c_10dpct.markdown(
+                    f"<div class='cell' style='{style_10}'>{ten_val:.2f}%</div>",
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                c_10dpct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+
         # Intraday % (colored scale using asymmetric intraday palette)
         if (intraday_pct is None) or is_closed:
             c_idaypct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
@@ -756,6 +794,35 @@ def main():
         f"padding:2px 8px; border-radius:6px; font-weight:600; "
         f"color:white; background:{badge_bg};'>"
         f"Intraday (Open): {fmt_money(intraday_abs_sum, 'EUR')} ({portfolio_intraday_pct:+.2f}%)</div>",
+        unsafe_allow_html=True,
+    )
+
+    # --- 10D totals (Open) ---
+    total_mv_open_10d = 0.0
+    for p in positions:
+        if bool(p.get("is_closed")):
+            continue
+        qty = float(p.get("quantity", 0.0))
+        p10 = p.get("price_10d")
+        try:
+            if p10 is not None:
+                total_mv_open_10d += qty * float(p10)
+        except Exception:
+            pass
+
+    if total_mv_open_10d:
+        ten_abs_sum = total_mv_open - total_mv_open_10d
+        ten_pct_total = (ten_abs_sum / total_mv_open_10d) * 100.0
+    else:
+        ten_abs_sum = 0.0
+        ten_pct_total = 0.0
+
+    badge_bg_10 = _GS_GRN if ten_pct_total >= 0 else _GS_RED
+    st.markdown(
+        f"<div style='display:inline-block; margin-top:4px; margin-left:8px; "
+        f"padding:2px 8px; border-radius:6px; font-weight:600; "
+        f"color:white; background:{badge_bg_10};'>"
+        f"10D (Open): {fmt_money(ten_abs_sum, 'EUR')} ({ten_pct_total:+.2f}%)</div>",
         unsafe_allow_html=True,
     )
 

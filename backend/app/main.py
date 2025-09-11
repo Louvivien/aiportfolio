@@ -101,6 +101,8 @@ async def read_positions():
         d["intraday_change"] = p.get("change")
         d["intraday_change_pct"] = p.get("change_pct")
         d["currency"] = p.get("currency")  # <-- NEW
+        d["price_10d"] = p.get("price_10d")
+        d["change_10d_pct"] = p.get("change_10d_pct")
 
         d["tags"] = await _get_tag_names(d.get("tags", []))
         d = _stringify_id(d)
