@@ -371,7 +371,7 @@ def main():
     else:
         vmin_tag10 = vmax_tag10 = 0.0
 
-    # Header row (add Intraday % as a narrow column)
+    # Header row (add Intraday % & 10D % as narrow columns)
     hdr_tag, hdr_mv, hdr_pl, hdr_iday, hdr_10d, _ = st.columns([2.2, 1.2, 1.2, 0.9, 0.9, 0.4])
     hdr_tag.markdown("**Tag**")
     hdr_mv.markdown("**Market Value**")
@@ -391,7 +391,7 @@ def main():
         c_mv.write(fmt2(t.get("total_market_value", 0.0)))
         c_pl.write(fmt2(t.get("total_unrealized_pl", 0.0)))
 
-        # Intraday % with asymmetric color scale (red→orange/yellow for negatives, yellow→green for positives)
+        # Intraday % with asymmetric color scale (red→yellow for negatives, yellow→green for positives)
         pct = t.get("intraday_change_pct")
         if pct is None:
             c_iday.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
@@ -430,8 +430,9 @@ def main():
             st.session_state.filter_tag = None
             st.rerun()
 
+    # >>> add/apply filter to positions here
     if st.session_state.filter_tag:
-        positions = [p for p in positions if st.session_state.filter_tag in p.get("tags", [])]
+        positions = [p for p in positions if st.session_state.filter_tag in (p.get("tags") or [])]
 
     # ── Build rows & color-scale stats ──────────────────────────
     rows = []
@@ -439,6 +440,7 @@ def main():
     intraday_pcts = []  # collect INTRADAY % for the scale
     total_invest_val = 0.0
     total_mv_val = 0.0
+    ten_day_pcts_for_scale = []
 
     for pos in positions:
         is_closed = bool(pos.get("is_closed"))
@@ -462,6 +464,17 @@ def main():
             except Exception:
                 pass
 
+        # 10D % per-row (compute from price_10d vs effective/current)
+        if (not is_closed) and (pos.get("price_10d") not in (None, 0)):
+            try:
+                p10 = float(pos.get("price_10d"))
+                ten_day_pct = ((effective_price - p10) / p10) * 100.0
+                ten_day_pcts_for_scale.append(ten_day_pct)
+            except Exception:
+                ten_day_pct = None
+        else:
+            ten_day_pct = None
+
         rows.append(
             (
                 pos,
@@ -474,6 +487,7 @@ def main():
                 pnl_value,
                 pnl_pct,
                 intraday_pct,
+                ten_day_pct,  # <- computed, not from backend
             )
         )
         pnl_values.append(pnl_value)
@@ -496,18 +510,10 @@ def main():
     else:
         vmin_idp = vmax_idp = 0.0
 
-    # 10D % scale (for table color)
-    ten_day_pcts = []
-    for pos, is_closed, _, qty, _, _, _, _, _, _ in rows:
-        v = None if is_closed else pos.get("change_10d_pct")
-        try:
-            if v is not None:
-                ten_day_pcts.append(float(v))
-        except Exception:
-            pass
-    if ten_day_pcts:
-        vmin_10d = min(ten_day_pcts)
-        vmax_10d = max(ten_day_pcts)
+    # 10D % scale for positions table
+    if ten_day_pcts_for_scale:
+        vmin_10d = min(ten_day_pcts_for_scale)
+        vmax_10d = max(ten_day_pcts_for_scale)
     else:
         vmin_10d = vmax_10d = 0.0
 
@@ -544,13 +550,13 @@ def main():
             st.session_state.sort_desc = False
 
     def _with_arrow(name: str) -> str:
-        """Return header text with ▲/▼ if active."""
+        """Show ▲/▼ on the active sort column."""
         if st.session_state.sort_by == name:
             return f"{name} {'▼' if st.session_state.sort_desc else '▲'}"
         return name
 
     # Header row: clickable buttons (no Actions column here)
-    header_layout = [1.1, 3.2, 0.9, 1.0, 1.1, 1.1, 1.3, 1.1, 1.0, 1.0, 1.0, 1.6]
+    header_layout = [1.1, 3.2, 0.9, 1.0, 1.1, 1.1, 1.3, 1.1, 1.0, 1.0, 1.0, 1.0, 1.6]
     hdr_cols = st.columns(header_layout)
     for col, header in zip(hdr_cols, header_labels):
         if col.button(_with_arrow(header), key=f"hdr_{header}"):
@@ -561,13 +567,32 @@ def main():
         st.session_state.sort_by = None
         st.session_state.sort_desc = False
 
-    # Apply sorting if active (uses your existing `rows` list)
+    # Apply sorting if active (uses the prebuilt `rows` list)
     def _row_value(row):
-        # rows: (pos, is_closed, effective_price, qty, cost, invest,
-        #        current_value, pnl_value, pnl_pct, intraday_pct)
-        pos, is_closed, eff, qty, cost, invest, curval, plv, plpct, idpct = row
-        tags_joined = ", ".join(pos.get("tags", [])) if pos.get("tags") else ""
+        """
+        Index-based extractor so future columns won't break sorting.
+        Layout today:
+          0 pos, 1 is_closed, 2 effective_price, 3 qty, 4 cost,
+          5 invest, 6 current_value, 7 pnl_value, 8 pnl_pct,
+          9 intraday_pct, 10 ten_day_pct (computed)
+        """
+        POS, CLOSED, EFF, QTY, COST, INVEST, CURVAL, PLV, PLPCT, IDPCT, TENPCT = range(11)
+
+        pos = row[POS]
+        is_closed = bool(row[CLOSED])
+        eff = row[EFF]
+        qty = row[QTY]
+        cost = row[COST]
+        invest = row[INVEST]
+        curval = row[CURVAL]
+        plv = row[PLV]
+        plpct = row[PLPCT]
+        idpct = row[IDPCT]
+        tenpct = row[TENPCT]
+
+        tags_joined = ", ".join(pos.get("tags", []) or [])
         sb = st.session_state.sort_by
+
         if sb == "Symbol":
             return (pos.get("symbol") or "").upper()
         if sb == "Name":
@@ -591,13 +616,13 @@ def main():
                 return None
             ch = pos.get("intraday_change")
             try:
-                return float(ch) * float(qty)  # sort by absolute intraday value (per-share × qty)
+                return float(ch) * float(qty)  # per-share change × qty (absolute)
             except (TypeError, ValueError):
                 return None
         if sb == "Intraday %":
             return None if is_closed else idpct
         if sb == "10D %":
-            return None if is_closed else pos.get("change_10d_pct")
+            return None if is_closed else tenpct
         if sb == "Tags":
             return tags_joined.upper()
         return None
@@ -615,7 +640,7 @@ def main():
         rows.sort(key=lambda r: _safe_key(_row_value(r)), reverse=st.session_state.sort_desc)
 
     # Columns: Symbol | Name | Qty | Cost | Current | Invest | Value
-    # | P/L | P/L % | Intraday | Intraday % | Tags | Actions
+    # | P/L | P/L % | Intraday | Intraday % | 10D % | Tags | Actions
     col_layout = [
         1.1,  # Symbol
         3.2,  # Name
@@ -663,6 +688,7 @@ def main():
         pnl_value,
         pnl_pct,
         intraday_pct,
+        ten_day_pct,  # <- unpack the computed 10D %
     ) in rows:
         (
             c_sym,
@@ -733,21 +759,15 @@ def main():
                 unsafe_allow_html=True,
             )
 
-        # 10D % (colored scale like intraday but 10-day window)
-        ten_pct = None if is_closed else pos.get("change_10d_pct")
-        if ten_pct is None:
+        # 10D % (colored scale like intraday but 10-day window, computed)
+        if (ten_day_pct is None) or is_closed:
             c_10dpct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
         else:
-            try:
-                ten_val = float(ten_pct)
-                # reuse intraday asymmetric palette (never green for negatives)
-                style_10 = _color_from_scale_intraday(ten_val, vmin_10d, vmax_10d)
-                c_10dpct.markdown(
-                    f"<div class='cell' style='{style_10}'>{ten_val:.2f}%</div>",
-                    unsafe_allow_html=True,
-                )
-            except Exception:
-                c_10dpct.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
+            style_10 = _color_from_scale_intraday(float(ten_day_pct), vmin_10d, vmax_10d)
+            c_10dpct.markdown(
+                f"<div class='cell' style='{style_10}'>{float(ten_day_pct):.2f}%</div>",
+                unsafe_allow_html=True,
+            )
 
         # Intraday % (colored scale using asymmetric intraday palette)
         if (intraday_pct is None) or is_closed:
@@ -776,6 +796,7 @@ def main():
                     st.rerun()
                 except Exception as e:
                     st.error(f"Error deleting: {e}")
+
     # ── Totals ─────────────────────────────────────────────────
     st.subheader("Totals")
 
