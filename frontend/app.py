@@ -309,6 +309,8 @@ def main():
         st.session_state.timeseries_period = "6mo"
     if "timeseries_interval" not in st.session_state:
         st.session_state.timeseries_interval = "1d"
+    if "timeseries_normalize" not in st.session_state:
+        st.session_state.timeseries_normalize = False
 
     # ── Add Position ─────────────────────────────────────────────
     with st.expander("➕ Add Position", expanded=True):
@@ -910,6 +912,17 @@ def main():
 
 @st.dialog("Tag Performance")
 def tag_performance_dialog():
+    st.markdown(
+        """
+        <style>
+            [data-testid="stDialog"] > div:first-child { width: min(95vw, 1100px); }
+            [data-testid="stDialog"] .stModal { width: min(95vw, 1100px); }
+            [data-testid="stDialog"] .stModal > div { width: 100%; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     period = st.selectbox(
         "Time range",
         options=["1mo", "3mo", "6mo", "1y", "2y"],
@@ -952,6 +965,12 @@ def tag_performance_dialog():
     )
     metric_key = "market_value" if metric_label == "Market Value" else "unrealized_pl"
 
+    normalize = st.checkbox(
+        "Normalize series (rebased to 100)",
+        key="timeseries_normalize",
+        help="Rebase each series to its first available point so different magnitudes remain comparable.",
+    )
+
     frames: list[dict[str, object]] = []
     for label in selection:
         series = total_data if label == "Total" else tags_data.get(label, [])
@@ -963,19 +982,59 @@ def tag_performance_dialog():
             frames.append({"date": pd.to_datetime(date), "value": float(value), "series": label})
 
     if frames:
-        df = pd.DataFrame(frames)
-        chart = (
-            alt.Chart(df)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("date:T", title="Date"),
-                y=alt.Y("value:Q", title=metric_label),
-                color=alt.Color("series:N", title="Category"),
-                tooltip=["series:N", "date:T", alt.Tooltip("value:Q", format=",.2f")],
-            )
-            .interactive()
-        )
-        st.altair_chart(chart, use_container_width=True)
+        df = pd.DataFrame(frames).sort_values("date")
+
+        if normalize:
+            def _normalize_group(group: pd.DataFrame) -> pd.DataFrame:
+                values = group["value"].dropna()
+                if values.empty:
+                    return group.assign(value=pd.NA)
+                first = values.iloc[0]
+                if first in (0, None) or pd.isna(first):
+                    non_zero = values[values.ne(0)]
+                    first = non_zero.iloc[0] if not non_zero.empty else None
+                if first in (0, None) or pd.isna(first):
+                    return group.assign(value=pd.NA)
+                return group.assign(value=(group["value"] / first) * 100.0)
+
+            df = df.groupby("series", group_keys=False).apply(_normalize_group)
+            df = df.dropna(subset=["value"])
+
+        if df.empty:
+            st.info("No data available for the selected categories.")
+        else:
+            y_title = "Indexed Value" if normalize else metric_label
+
+            average_df = df.groupby("date", as_index=False)["value"].mean().assign(series="Average")
+
+            chart_layers = [
+                alt.Chart(df)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("date:T", title="Date"),
+                    y=alt.Y("value:Q", title=y_title),
+                    color=alt.Color("series:N", title="Category"),
+                    tooltip=["series:N", "date:T", alt.Tooltip("value:Q", format=",.2f")],
+                )
+            ]
+
+            if not average_df.empty:
+                chart_layers.append(
+                    alt.Chart(average_df)
+                    .mark_line(strokeDash=[6, 4], color="#333")
+                    .encode(
+                        x=alt.X("date:T", title="Date"),
+                        y=alt.Y("value:Q", title=y_title),
+                        tooltip=[
+                            alt.Tooltip("series:N", title="Category"),
+                            "date:T",
+                            alt.Tooltip("value:Q", title="Average", format=",.2f"),
+                        ],
+                    )
+                )
+
+            chart = alt.layer(*chart_layers).properties(height=420).interactive()
+            st.altair_chart(chart, use_container_width=True)
     else:
         st.info("No data available for the selected categories.")
 
