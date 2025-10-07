@@ -1,6 +1,7 @@
 # backend/tests/conftest.py
 import copy
 import sys
+import types
 import uuid
 from pathlib import Path
 
@@ -128,10 +129,33 @@ def anyio_backend():
 
 
 @pytest_asyncio.fixture(scope="session")
-async def app_fixture(monkeypatch):
+async def app_fixture():
     """
     Patch the app's database to use the in-memory fake BEFORE importing the app.
     """
+    # Provide a lightweight yfinance stub so backend imports succeed without the
+    # real dependency being installed in the test environment.
+    if "yfinance" not in sys.modules:
+        dummy = types.ModuleType("yfinance")
+
+        class _DummyTicker:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @property
+            def fast_info(self):
+                return {}
+
+            @property
+            def info(self):
+                return {}
+
+            def history(self, *args, **kwargs):
+                raise NotImplementedError
+
+        dummy.Ticker = _DummyTicker
+        sys.modules["yfinance"] = dummy
+
     from backend.app import database as dbmod  # import module to patch its globals
 
     # Drop any real client/db and replace with fake

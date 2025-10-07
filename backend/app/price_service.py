@@ -1,5 +1,6 @@
 # backend/app/price_service.py
 
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import yfinance as yf
@@ -111,5 +112,62 @@ async def get_prices(symbols: List[str]) -> Dict[str, Dict]:
                 "price_10d": None,
                 "change_10d_pct": None,
             }
+
+    return out
+
+
+async def get_price_history(
+    symbols: List[str],
+    *,
+    period: str = "6mo",
+    interval: str = "1d",
+) -> Dict[str, List[Dict[str, float]]]:
+    """
+    Fetch historical close prices for each symbol.
+
+    Returns a dict keyed by uppercased symbol where each value is a list of
+    dicts ``{"date": "YYYY-MM-DD", "close": float}`` sorted by date
+    ascending. Failures per symbol are tolerated and represented with an
+    empty list.
+    """
+
+    out: Dict[str, List[Dict[str, float]]] = {}
+
+    for raw in symbols:
+        sym = raw.upper()
+        try:
+            ticker = yf.Ticker(raw)
+            hist = ticker.history(period=period, interval=interval)
+
+            if hist.empty or "Close" not in hist:
+                out[sym] = []
+                continue
+
+            closes = hist["Close"].dropna()
+            points: List[Dict[str, float]] = []
+            for idx, close in closes.items():
+                date_str: str
+                if hasattr(idx, "to_pydatetime"):
+                    dt = idx.to_pydatetime()
+                    if isinstance(dt, datetime):
+                        date_str = dt.date().isoformat()
+                    else:
+                        date_str = str(idx)
+                elif isinstance(idx, datetime):
+                    date_str = idx.date().isoformat()
+                else:
+                    date_str = str(idx)
+
+                try:
+                    close_f = float(close)
+                except Exception:
+                    continue
+
+                points.append({"date": date_str, "close": close_f})
+
+            points.sort(key=lambda row: row["date"])
+            out[sym] = points
+        except Exception:
+            out[sym] = []
 
     return out
