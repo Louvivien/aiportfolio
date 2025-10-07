@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .database import db
 from .models import PositionCreate, PositionModel, PositionUpdate, TagModel
-from .price_service import get_prices
+from .price_service import get_price_history, get_prices
 
 app = FastAPI(title="Portfolio Backend")
 
@@ -413,3 +413,89 @@ async def positions_tags_summary():
         result.append(b)
 
     return result
+
+
+@app.get("/positions/tags/timeseries")
+async def positions_tags_timeseries(period: str = "6mo", interval: str = "1d"):
+    """Time-series market value & unrealized P/L aggregated by tag.
+
+    Only *open* positions are included, mirroring the behaviour of the tag
+    summary endpoint. ``period`` and ``interval`` are passed directly to
+    yfinance (via :func:`get_price_history`).
+    """
+
+    docs = await db.positions.find().to_list(1000)
+
+    # Only open positions can contribute to the time-series.
+    open_positions = [d for d in docs if not _as_true(d.get("is_closed", False))]
+    if not open_positions:
+        return {"tags": {}, "total": []}
+
+    symbols = sorted({d["symbol"].upper() for d in open_positions})
+    try:
+        history_map = await get_price_history(symbols, period=period, interval=interval)
+    except Exception:
+        history_map = {s: [] for s in symbols}
+
+    # Map tag IDs to names for the positions that remain.
+    tag_ids = {tid for d in open_positions for tid in d.get("tags", [])}
+    tag_docs = (
+        await db.tags.find({"_id": {"$in": list(tag_ids)}}).to_list(None)
+        if tag_ids
+        else []
+    )
+    tag_map = {t["_id"]: t["name"] for t in tag_docs}
+
+    # Ensure every tag from the open positions is represented even if it ends
+    # up with an empty series (e.g., missing history data).
+    tag_series: dict[str, dict[str, dict[str, float]]] = {
+        tag_map[tid]: {} for tid in tag_ids if tid in tag_map
+    }
+    total_series: dict[str, dict[str, float]] = {}
+
+    for d in open_positions:
+        sym = d["symbol"].upper()
+        qty = float(d.get("quantity", 0.0))
+        cost = float(d.get("cost_price", 0.0))
+        history = history_map.get(sym) or []
+        if not history or qty == 0:
+            continue
+
+        tag_names = []
+        for tid in d.get("tags", []):
+            name = tag_map.get(tid)
+            if name:
+                tag_names.append(name)
+
+        for point in history:
+            date = point.get("date")
+            close = point.get("close")
+            if not date or close is None:
+                continue
+
+            mv = float(close) * qty
+            pl = (float(close) - cost) * qty
+
+            total_entry = total_series.setdefault(
+                date,
+                {"date": date, "market_value": 0.0, "unrealized_pl": 0.0},
+            )
+            total_entry["market_value"] += mv
+            total_entry["unrealized_pl"] += pl
+
+            for name in tag_names:
+                series_bucket = tag_series.setdefault(name, {})
+                entry = series_bucket.setdefault(
+                    date,
+                    {"date": date, "market_value": 0.0, "unrealized_pl": 0.0},
+                )
+                entry["market_value"] += mv
+                entry["unrealized_pl"] += pl
+
+    tags_output = {
+        name: [series[date] for date in sorted(series.keys())]
+        for name, series in tag_series.items()
+    }
+    total_output = [total_series[date] for date in sorted(total_series.keys())]
+
+    return {"tags": tags_output, "total": total_output}

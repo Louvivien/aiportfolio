@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import statistics
 
+import altair as alt
 import httpx
+import pandas as pd
 import streamlit as st
 from streamlit_tags import st_tags
 
@@ -243,6 +245,15 @@ def load_tag_summary():
     return call_api("GET", "/positions/tags/summary")
 
 
+@st.cache_data(ttl=300)
+def load_tag_timeseries(period: str = "6mo", interval: str = "1d"):
+    return call_api(
+        "GET",
+        "/positions/tags/timeseries",
+        params={"period": period, "interval": interval},
+    )
+
+
 def post_position(data: dict):
     return call_api("POST", "/positions", json=data)
 
@@ -290,6 +301,14 @@ def main():
     # Tag filter state
     if "filter_tag" not in st.session_state:
         st.session_state.filter_tag = None
+    if "timeseries_open" not in st.session_state:
+        st.session_state.timeseries_open = False
+    if "timeseries_selection" not in st.session_state:
+        st.session_state.timeseries_selection = []
+    if "timeseries_period" not in st.session_state:
+        st.session_state.timeseries_period = "6mo"
+    if "timeseries_interval" not in st.session_state:
+        st.session_state.timeseries_interval = "1d"
 
     # ── Add Position ─────────────────────────────────────────────
     with st.expander("➕ Add Position", expanded=True):
@@ -372,16 +391,21 @@ def main():
         vmin_tag10 = vmax_tag10 = 0.0
 
     # Header row (add Intraday % & 10D % as narrow columns)
-    hdr_tag, hdr_mv, hdr_pl, hdr_iday, hdr_10d, _ = st.columns([2.2, 1.2, 1.2, 0.9, 0.9, 0.4])
+    hdr_tag, hdr_mv, hdr_pl, hdr_iday, hdr_10d, hdr_chart = st.columns(
+        [2.2, 1.2, 1.2, 0.9, 0.9, 0.5]
+    )
     hdr_tag.markdown("**Tag**")
     hdr_mv.markdown("**Market Value**")
     hdr_pl.markdown("**Unrealized P/L**")
     hdr_iday.markdown("**Intraday %**")
     hdr_10d.markdown("**10D %**")
+    if hdr_chart.button("📈", key="chart_total", help="View total performance"):
+        st.session_state.timeseries_selection = ["Total"]
+        st.session_state.timeseries_open = True
 
     # Data rows
     for t in tags_summary:
-        c_tag, c_mv, c_pl, c_iday, c_10d, c_sp = st.columns([2.2, 1.2, 1.2, 0.9, 0.9, 0.4])
+        c_tag, c_mv, c_pl, c_iday, c_10d, c_sp = st.columns([2.2, 1.2, 1.2, 0.9, 0.9, 0.5])
 
         # Tag as a filter button
         if c_tag.button(t["tag"], key=f"filter_{t['tag']}"):
@@ -421,7 +445,9 @@ def main():
             except Exception:
                 c_10d.markdown("<div class='cell muted'>—</div>", unsafe_allow_html=True)
 
-        c_sp.write("")
+        if c_sp.button("📈", key=f"chart_{t['tag']}", help="View tag performance"):
+            st.session_state.timeseries_selection = [t["tag"]]
+            st.session_state.timeseries_open = True
 
     # Show/clear active filter
     if st.session_state.filter_tag:
@@ -433,6 +459,9 @@ def main():
     # >>> add/apply filter to positions here
     if st.session_state.filter_tag:
         positions = [p for p in positions if st.session_state.filter_tag in (p.get("tags") or [])]
+
+    if st.session_state.get("timeseries_open"):
+        tag_performance_dialog()
 
     # ── Build rows & color-scale stats ──────────────────────────
     rows = []
@@ -877,6 +906,83 @@ def main():
         f"10D (Open): {fmt_money(ten_abs_sum, 'EUR')} ({ten_pct_total:+.2f}%)</div>",
         unsafe_allow_html=True,
     )
+
+
+@st.dialog("Tag Performance")
+def tag_performance_dialog():
+    period = st.selectbox(
+        "Time range",
+        options=["1mo", "3mo", "6mo", "1y", "2y"],
+        key="timeseries_period",
+        help="Select the time window for the performance chart.",
+    )
+    interval = st.selectbox(
+        "Sampling interval",
+        options=["1d", "1wk", "1mo"],
+        key="timeseries_interval",
+        help="Choose how frequently points are plotted.",
+    )
+
+    data = load_tag_timeseries(period=period, interval=interval)
+    tags_data = data.get("tags", {}) if isinstance(data, dict) else {}
+    total_data = data.get("total", []) if isinstance(data, dict) else []
+
+    tag_options = sorted(tags_data.keys())
+    if total_data:
+        tag_options.append("Total")
+
+    default_selection = [
+        t for t in st.session_state.get("timeseries_selection", []) if t in tag_options
+    ]
+    if not default_selection and tag_options:
+        default_selection = [tag_options[0]]
+
+    selection = st.multiselect(
+        "Select categories to compare",
+        options=tag_options,
+        default=default_selection,
+        key="timeseries_selection",
+    )
+
+    metric_label = st.radio(
+        "Metric",
+        options=["Market Value", "Unrealized P/L"],
+        horizontal=True,
+        key="timeseries_metric",
+    )
+    metric_key = "market_value" if metric_label == "Market Value" else "unrealized_pl"
+
+    frames: list[dict[str, object]] = []
+    for label in selection:
+        series = total_data if label == "Total" else tags_data.get(label, [])
+        for point in series or []:
+            date = point.get("date")
+            value = point.get(metric_key)
+            if date is None or value is None:
+                continue
+            frames.append({"date": pd.to_datetime(date), "value": float(value), "series": label})
+
+    if frames:
+        df = pd.DataFrame(frames)
+        chart = (
+            alt.Chart(df)
+            .mark_line(point=True)
+            .encode(
+                x=alt.X("date:T", title="Date"),
+                y=alt.Y("value:Q", title=metric_label),
+                color=alt.Color("series:N", title="Category"),
+                tooltip=["series:N", "date:T", alt.Tooltip("value:Q", format=",.2f")],
+            )
+            .interactive()
+        )
+        st.altair_chart(chart, use_container_width=True)
+    else:
+        st.info("No data available for the selected categories.")
+
+    col_close, col_spacer = st.columns([1, 3])
+    if col_close.button("Close"):
+        st.session_state.timeseries_open = False
+        st.rerun()
 
 
 if __name__ == "__main__":
